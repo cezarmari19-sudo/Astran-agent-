@@ -61,6 +61,21 @@ export default function BuildScreen() {
     }
   };
 
+  const remove = async () => {
+    if (!confirmDel) return;
+    setDeleting(true);
+    try {
+      await api.deleteProject(confirmDel.id);
+      setProjects((p) => p.filter((x) => x.id !== confirmDel.id));
+      setConfirmDel(null);
+      show("Chat șters");
+    } catch (e: any) {
+      show(e.message, "err");
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   const renderItem = ({ item }: { item: Project }) => (
     <Pressable
       testID={`project-card-${item.id}`}
@@ -81,6 +96,14 @@ export default function BuildScreen() {
           {item.files?.length || 0} fișiere generate
         </Text>
       </View>
+      <Pressable
+        testID={`delete-project-${item.id}`}
+        onPress={() => setConfirmDel(item)}
+        hitSlop={10}
+        style={{ padding: 4 }}
+      >
+        <Ionicons name="trash-outline" size={19} color={colors.danger} />
+      </Pressable>
       <Ionicons name="chevron-forward" size={20} color={colors.faint} />
     </Pressable>
   );
@@ -266,4 +289,35 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     fontSize: 15,
   },
+  confirmWrap: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: space.lg,
+  },
+  confirmCard: {
+    width: "100%",
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: space.lg,
+    alignItems: "center",
+    gap: 10,
+  },
+  confirmTitle: { color: colors.text, fontSize: 18, fontWeight: "800" },
+  confirmText: { color: colors.muted, fontSize: 14, textAlign: "center", lineHeight: 20 },
+  confirmRow: { flexDirection: "row", gap: space.sm, marginTop: space.sm, width: "100%" },
+  confirmBtn: {
+    flex: 1,
+    height: 48,
+    borderRadius: radius.md,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  cancelBtn: { backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
+  delBtn: { backgroundColor: colors.danger },
+  cancelText: { color: colors.text, fontWeight: "800", fontSize: 15 },
+  delText: { color: "#fff", fontWeight: "800", fontSize: 15 },
 });
