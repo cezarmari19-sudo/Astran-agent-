@@ -245,19 +245,33 @@ function FilesTab({ files }: { files: ProjFile[] }) {
 function ReviewTab({ id, onDone, show, hasFiles }: any) {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<any>(null);
+  const pollRef = useRef<any>(null);
+
+  useEffect(() => () => pollRef.current && clearInterval(pollRef.current), []);
 
   const run = async () => {
     setRunning(true);
     setResult(null);
     try {
-      const res = await api.review(id);
-      setResult(res);
-      onDone();
-      show(res.stopped_clean ? "Verificare completă — curat!" : "Verificare finalizată");
+      const { job_id } = await api.review(id);
+      pollRef.current = setInterval(async () => {
+        try {
+          const job = await api.reviewStatus(job_id);
+          setResult(job);
+          if (job.done) {
+            clearInterval(pollRef.current);
+            setRunning(false);
+            onDone();
+            if (job.error) show("Eroare la verificare", "err");
+            else show(job.stopped_clean ? "Verificare completă — curat!" : "Verificare finalizată");
+          }
+        } catch {
+          /* keep polling */
+        }
+      }, 2000);
     } catch (e: any) {
-      show(e.message, "err");
-    } finally {
       setRunning(false);
+      show(e.message, "err");
     }
   };
 
@@ -272,20 +286,19 @@ function ReviewTab({ id, onDone, show, hasFiles }: any) {
       </View>
       <PrimaryButton
         testID="run-review-btn"
-        title={running ? "Rulează agentul…" : "Rulează verificarea"}
+        title={running ? "Agentul rulează…" : "Rulează verificarea"}
         icon="shield-checkmark"
         loading={running}
-        disabled={!hasFiles}
+        disabled={!hasFiles || running}
         onPress={run}
       />
-      {!hasFiles && (
-        <Text style={styles.warnText}>Generează întâi cod în Chat.</Text>
-      )}
+      {!hasFiles && <Text style={styles.warnText}>Generează întâi cod în Chat.</Text>}
 
       {result && (
         <View style={{ marginTop: space.md }}>
           <Text style={styles.sectionTitle}>
-            {result.total_passes} treceri {result.stopped_clean ? "• curat ✓" : ""}
+            {result.passes.length} treceri{" "}
+            {result.done ? (result.stopped_clean ? "• curat ✓" : "• finalizat") : "• în curs…"}
           </Text>
           {result.passes.map((p: any) => (
             <View key={p.pass} style={styles.passCard}>
@@ -315,6 +328,12 @@ function ReviewTab({ id, onDone, show, hasFiles }: any) {
               {p.summary ? <Text style={styles.passSummary}>{p.summary}</Text> : null}
             </View>
           ))}
+          {!result.done && (
+            <View style={styles.liveRow}>
+              <ActivityIndicator color={colors.accent} />
+              <Text style={styles.passSummary}>Agentul continuă verificarea…</Text>
+            </View>
+          )}
         </View>
       )}
     </ScrollView>
@@ -422,163 +441,3 @@ function GithubTab({ id, show, hasFiles }: any) {
               />
               <Text style={styles.commitPath} numberOfLines={1}>
                 {r.path}
-              </Text>
-              {!r.ok && <Text style={styles.commitErr}>{r.error}</Text>}
-            </View>
-          ))}
-        </View>
-      )}
-    </ScrollView>
-  );
-}
-
-function sevColor(sev: string) {
-  if (sev === "high") return { backgroundColor: colors.danger };
-  if (sev === "medium") return { backgroundColor: colors.warn };
-  return { backgroundColor: colors.accent2 };
-}
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: colors.bg },
-  center: { flex: 1, alignItems: "center", justifyContent: "center", padding: space.lg, gap: 10 },
-  emptyText: { color: colors.muted, textAlign: "center", lineHeight: 20 },
-  segment: {
-    flexDirection: "row",
-    backgroundColor: colors.surface,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-    paddingHorizontal: space.sm,
-    paddingVertical: space.sm,
-    gap: 6,
-  },
-  segBtn: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 5,
-    paddingVertical: 9,
-    borderRadius: radius.md,
-  },
-  segBtnActive: { backgroundColor: colors.surface2 },
-  segText: { color: colors.faint, fontSize: 12, fontWeight: "700" },
-  hint: {
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.lg,
-    padding: space.md,
-    marginBottom: space.md,
-  },
-  hintTitle: { color: colors.text, fontWeight: "800", fontSize: 15, marginBottom: 6 },
-  hintText: { color: colors.muted, fontSize: 13, lineHeight: 19 },
-  bubble: {
-    borderRadius: radius.lg,
-    padding: space.md,
-    marginBottom: space.sm + 2,
-    maxWidth: "92%",
-  },
-  userBubble: { backgroundColor: colors.accent, alignSelf: "flex-end" },
-  aiBubble: {
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-    alignSelf: "flex-start",
-  },
-  aiTag: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 6 },
-  brandDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.accent },
-  aiTagText: { color: colors.accent, fontSize: 12, fontWeight: "800" },
-  bubbleText: { color: colors.text, fontSize: 14, lineHeight: 21 },
-  thinking: { color: colors.muted, marginTop: 8, fontSize: 13 },
-  inputBar: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    gap: space.sm,
-    padding: space.sm + 2,
-    paddingBottom: space.md,
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
-    backgroundColor: colors.surface,
-  },
-  chatInput: {
-    flex: 1,
-    maxHeight: 130,
-    backgroundColor: colors.surface2,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.lg,
-    color: colors.text,
-    paddingHorizontal: space.md,
-    paddingVertical: 12,
-    fontSize: 15,
-  },
-  sendBtn: {
-    width: 46,
-    height: 46,
-    borderRadius: 23,
-    backgroundColor: colors.accent,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  fileCard: {
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    marginBottom: space.sm,
-    overflow: "hidden",
-  },
-  fileHead: { flexDirection: "row", alignItems: "center", gap: 8, padding: space.md },
-  filePath: { flex: 1, color: colors.text, fontSize: 13, fontWeight: "700" },
-  codeWrap: { backgroundColor: colors.code, padding: space.md, maxHeight: 320 },
-  code: { color: "#B8E6C8", fontFamily: "monospace", fontSize: 12, lineHeight: 18 },
-  infoCard: {
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.lg,
-    padding: space.md,
-    marginBottom: space.md,
-  },
-  infoTitle: { color: colors.text, fontWeight: "800", fontSize: 15, marginBottom: 6 },
-  infoText: { color: colors.muted, fontSize: 13, lineHeight: 19 },
-  warnText: { color: colors.warn, fontSize: 12, marginTop: 8, textAlign: "center" },
-  sectionTitle: { color: colors.text, fontWeight: "800", fontSize: 15, marginBottom: space.sm },
-  passCard: {
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    padding: space.md,
-    marginBottom: space.sm,
-  },
-  passHead: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  passTitle: { color: colors.text, fontWeight: "800" },
-  badge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20 },
-  badgeText: { color: "#04140B", fontWeight: "800", fontSize: 11 },
-  issue: { flexDirection: "row", gap: 8, marginTop: 10 },
-  dot: { width: 8, height: 8, borderRadius: 4, marginTop: 5 },
-  issueFile: { color: colors.accent2, fontSize: 12, fontWeight: "700" },
-  issueDesc: { color: colors.text, fontSize: 13, marginTop: 2, lineHeight: 18 },
-  issueFix: { color: colors.muted, fontSize: 12, marginTop: 3, fontStyle: "italic" },
-  passSummary: { color: colors.muted, fontSize: 12, marginTop: 10 },
-  label: { color: colors.muted, fontSize: 12, fontWeight: "700", marginBottom: 6, marginTop: 12 },
-  input: {
-    backgroundColor: colors.surface2,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    color: colors.text,
-    paddingHorizontal: space.md,
-    paddingVertical: 13,
-    fontSize: 15,
-  },
-  commitRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    paddingVertical: 6,
-  },
-  commitPath: { color: colors.text, fontSize: 13, flexShrink: 1 },
-  commitErr: { color: colors.danger, fontSize: 11 },
-});
