@@ -81,7 +81,7 @@ export default function ProjectScreen() {
     <View style={styles.container}>
       <Header
         title={project?.name || "Proiect"}
-        subtitle={`${project?.files?.length || 0} fișiere • Gemini 2.5 Flash`}
+        subtitle={`${project?.files?.length || 0} fișiere • Gemini 3.5 Flash`}
         onBack={() => router.back()}
       />
 
