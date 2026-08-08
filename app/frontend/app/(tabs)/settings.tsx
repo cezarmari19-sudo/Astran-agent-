@@ -109,7 +109,7 @@ export default function SettingsScreen() {
             <Text style={styles.sectionTitle}>Despre</Text>
           </View>
           <Text style={styles.help}>
-            AI Builder — planifică și construiește aplicații cu Gemini 2.5 Flash. Un agent de
+            AI Builder — planifică și construiește aplicații cu Gemini 3.5 Flash. Un agent de
             verificare rulează în buclă până nu mai găsește probleme, apoi confirmă de 2 ori.
             Unelte: calculator, căutare web (SearXNG), notițe și commit direct pe GitHub.
           </Text>
