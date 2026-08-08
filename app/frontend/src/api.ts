@@ -42,6 +42,7 @@ export const api = {
   chat: (id: string, message: string) =>
     req(`/projects/${id}/chat`, { method: "POST", body: JSON.stringify({ message }) }),
   review: (id: string) => req(`/projects/${id}/review`, { method: "POST" }),
+  reviewStatus: (jobId: string) => req(`/review/${jobId}`),
 
   listNotes: () => req("/notes"),
   createNote: (title: string, content: string) =>
