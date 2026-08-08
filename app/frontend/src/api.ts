@@ -39,8 +39,12 @@ export const api = {
   getProject: (id: string): Promise<Project> => req(`/projects/${id}`),
   deleteProject: (id: string) => req(`/projects/${id}`, { method: "DELETE" }),
   getMessages: (id: string) => req(`/projects/${id}/messages`),
-  chat: (id: string, message: string) =>
-    req(`/projects/${id}/chat`, { method: "POST", body: JSON.stringify({ message }) }),
+  chat: (id: string, message: string, model?: string) =>
+    req(`/projects/${id}/chat`, {
+      method: "POST",
+      body: JSON.stringify({ message, model }),
+    }),
+  getModels: () => req("/models"),
   review: (id: string) => req(`/projects/${id}/review`, { method: "POST" }),
   reviewStatus: (jobId: string) => req(`/review/${jobId}`),
 
