@@ -30,7 +30,17 @@ export default function ProjectScreen() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [tab, setTab] = useState<Tab>("chat");
+  const [confirmDel, setConfirmDel] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
+
+  const removeProject = async () => {
+    try {
+      await api.deleteProject(id!);
+      router.back();
+    } catch (e: any) {
+      show(e.message, "err");
+    }
+  };
 
   const load = useCallback(async () => {
     try {
@@ -84,6 +94,11 @@ export default function ProjectScreen() {
         title={project?.name || "Proiect"}
         subtitle={`${project?.files?.length || 0} fișiere • Gemini 3.5 Flash`}
         onBack={() => router.back()}
+        right={
+          <Pressable testID="delete-chat-btn" onPress={() => setConfirmDel(true)} hitSlop={10}>
+            <Ionicons name="trash-outline" size={22} color={colors.danger} />
+          </Pressable>
+        }
       />
 
       <View style={styles.segment}>
@@ -621,4 +636,30 @@ const styles = StyleSheet.create({
   },
   commitPath: { color: colors.text, fontSize: 13, flexShrink: 1 },
   commitErr: { color: colors.danger, fontSize: 11 },
+  liveRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: space.sm },
+  confirmWrap: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: space.lg,
+  },
+  confirmCard: {
+    width: "100%",
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: space.lg,
+    alignItems: "center",
+    gap: 10,
+  },
+  confirmTitle: { color: colors.text, fontSize: 18, fontWeight: "800" },
+  confirmText: { color: colors.muted, fontSize: 14, textAlign: "center", lineHeight: 20 },
+  confirmRow: { flexDirection: "row", gap: space.sm, marginTop: space.sm, width: "100%" },
+  confirmBtn: { flex: 1, height: 48, borderRadius: radius.md, alignItems: "center", justifyContent: "center" },
+  cancelBtn: { backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
+  delBtn: { backgroundColor: colors.danger },
+  cancelText: { color: colors.text, fontWeight: "800", fontSize: 15 },
+  delText: { color: "#fff", fontWeight: "800", fontSize: 15 },
 });
