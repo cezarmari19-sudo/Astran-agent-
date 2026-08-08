@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -35,6 +35,9 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
+
+# In-memory store for background review jobs: {job_id: {...}}
+review_jobs: dict = {}
 
 
 def now_iso():
@@ -269,50 +272,98 @@ async def project_chat(pid: str, body: ChatIn):
             "message": clean(ai_msg)}
 
 
+# ---------------- Review (background job + polling) ----------------
+async def run_review_job(job_id: str, pid: str):
+    job = review_jobs[job_id]
+    try:
+        project = await db.projects.find_one({"id": pid})
+        if not project:
+            job["status"] = "error"
+            job["error"] = "Proiect inexistent"
+            return
+
+        files = project.get("files", [])
+        if not files:
+            job["status"] = "error"
+            job["error"] = "Nu exista cod de verificat. Genereaza intai o aplicatie in chat."
+            return
+
+        clean_streak = 0
+        max_passes = 12  # background job has no HTTP timeout, so we can allow more passes
+        current = {f["path"]: f["content"] for f in files}
+
+        for i in range(max_passes):
+            blob = "\n\n".join([f"### FILE: {p}\n```\n{c}\n```" for p, c in current.items()])
+            prompt = f"Review pass #{i+1}. Current project files:\n\n{blob}"
+            raw = await llm_generate(REVIEW_SYSTEM, prompt, f"review-{pid}-{i}")
+            data = extract_json(raw)
+            if not data:
+                data = {"issues": [{"severity": "low", "file": "-",
+                                    "description": "Agentul a raspuns in format liber.",
+                                    "fix": raw[:500]}], "files": [], "summary": "Format neuzual."}
+            issues = data.get("issues", [])
+            fixed = data.get("files", [])
+            for f in fixed:
+                if f.get("path"):
+                    current[f["path"]] = f.get("content", current.get(f["path"], ""))
+
+            job["passes"].append({"pass": i + 1, "issues": issues,
+                                   "summary": data.get("summary", ""),
+                                   "fixed_count": len(fixed)})
+
+            # persist partial progress so files aren't lost if the job is interrupted
+            partial_files = [{"path": p, "content": c} for p, c in current.items()]
+            await db.projects.update_one({"id": pid},
+                                         {"$set": {"files": partial_files, "updated_at": now_iso()}})
+
+            if not issues:
+                clean_streak += 1
+            else:
+                clean_streak = 0
+            if clean_streak >= 3:
+                break
+
+        final_files = [{"path": p, "content": c} for p, c in current.items()]
+        job["files"] = final_files
+        job["stopped_clean"] = clean_streak >= 3
+        job["total_passes"] = len(job["passes"])
+        job["status"] = "done"
+    except Exception as e:
+        logger.error(f"Review job {job_id} failed: {e}")
+        job["status"] = "error"
+        job["error"] = str(e)
+
+
 @api_router.post("/projects/{pid}/review")
-async def review_project(pid: str):
+async def start_review(pid: str, background_tasks: BackgroundTasks):
     project = await db.projects.find_one({"id": pid})
     if not project:
         raise HTTPException(404, "Proiect inexistent")
-    files = project.get("files", [])
-    if not files:
+    if not project.get("files"):
         raise HTTPException(400, "Nu exista cod de verificat. Genereaza intai o aplicatie in chat.")
 
-    passes = []
-    clean_streak = 0
-    max_passes = 5  # practical cap so the request never times out
-    current = {f["path"]: f["content"] for f in files}
+    job_id = str(uuid.uuid4())
+    review_jobs[job_id] = {
+        "id": job_id,
+        "project_id": pid,
+        "status": "running",
+        "passes": [],
+        "files": [],
+        "stopped_clean": False,
+        "total_passes": 0,
+        "error": None,
+        "created_at": now_iso(),
+    }
+    background_tasks.add_task(run_review_job, job_id, pid)
+    return {"job_id": job_id, "status": "running"}
 
-    for i in range(max_passes):
-        blob = "\n\n".join([f"### FILE: {p}\n```\n{c}\n```" for p, c in current.items()])
-        prompt = f"Review pass #{i+1}. Current project files:\n\n{blob}"
-        raw = await llm_generate(REVIEW_SYSTEM, prompt, f"review-{pid}-{i}")
-        data = extract_json(raw)
-        if not data:
-            data = {"issues": [{"severity": "low", "file": "-",
-                                "description": "Agentul a raspuns in format liber.",
-                                "fix": raw[:500]}], "files": [], "summary": "Format neuzual."}
-        issues = data.get("issues", [])
-        fixed = data.get("files", [])
-        for f in fixed:
-            if f.get("path"):
-                current[f["path"]] = f.get("content", current.get(f["path"], ""))
-        passes.append({"pass": i + 1, "issues": issues,
-                       "summary": data.get("summary", ""),
-                       "fixed_count": len(fixed)})
-        if not issues:
-            clean_streak += 1
-        else:
-            clean_streak = 0
-        # run until clean, then 2 more confirmation passes (3 consecutive clean total)
-        if clean_streak >= 3:
-            break
 
-    final_files = [{"path": p, "content": c} for p, c in current.items()]
-    await db.projects.update_one({"id": pid},
-                                 {"$set": {"files": final_files, "updated_at": now_iso()}})
-    return {"passes": passes, "files": final_files,
-            "stopped_clean": clean_streak >= 3, "total_passes": len(passes)}
+@api_router.get("/projects/{pid}/review/{job_id}")
+async def get_review_status(pid: str, job_id: str):
+    job = review_jobs.get(job_id)
+    if not job or job["project_id"] != pid:
+        raise HTTPException(404, "Job inexistent")
+    return job
 
 
 # Notes
