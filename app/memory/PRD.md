@@ -5,20 +5,26 @@ User (Romanian) wants an AI app-builder to compete with Emergent: keeps the AI A
 
 ## Architecture
 - Frontend: Expo Router (React Native), dark developer theme, tabs: Build / Tools / Notes / Settings + project detail screen.
-- Backend: FastAPI + MongoDB (motor). Gemini via emergentintegrations (`gemini-3.1-pro-preview`), key secret in backend/.env with Emergent universal key as automatic fallback.
+- Backend: FastAPI + MongoDB (motor). Gemini via emergentintegrations, key secret in backend/.env with Emergent universal key as automatic fallback.
 - Web search: public SearXNG instances (JSON).
 
 ## Core Requirements (static)
 1. AI key never leaves the server. ✔ (only backend reads it)
 2. Chat builder that plans + generates full code files. ✔
-3. Single iterative review agent: loops until clean + 2 confirmation passes (3 consecutive clean), practical cap 5 passes. ✔
+3. Single iterative review agent: loops until clean + 2 confirmation passes (3 consecutive clean), background job with polling (no HTTP timeout). ✔
 4. GitHub commit of generated files via user PAT. ✔
 5. Tools: calculator, web search (SearXNG), notes. ✔
+6. Delete a project/chat from Build list and from inside the chat. ✔
 
 ## Implemented (2026-08-04)
-- Backend endpoints: /health, projects CRUD, project chat (Gemini + file parsing), review agent loop, notes CRUD, calculator, websearch, github repos+commit.
-- Frontend: Build (projects list/create), project detail (Chat/Files/Review/GitHub tabs), Tools (calculator+search), Notes, Settings (GitHub token verify, security status, about).
-- Verified via curl: health, calculator, project create, Gemini chat reply.
+- Model: gemini-3.5-flash (user's free-tier key works with it; pro models rate-limited, 2.5-flash deprecated for new keys). Emergent key fallback.
+- Backend endpoints: /health, projects CRUD (+delete), project chat (Gemini + file parsing), review as background job (POST /review -> job_id, GET /review/{job_id} polling, loops until 3 consecutive clean, cap 8), notes CRUD, calculator, websearch, github repos+commit.
+- Frontend: Build (projects list/create/DELETE with confirm), project detail (Chat/Files/Review-live-polling/GitHub tabs, delete-chat in header), Tools (calculator+search), Notes, Settings.
+- Delete chat: trash on each Build card + trash in project header, both with confirm modal.
+- Verified: health, calculator, project create, Gemini chat + file parsing, review background job (3 passes, live progress), delete UI.
+
+## Deployment note
+- On Render: set GEMINI_API_KEY (and optionally EMERGENT_LLM_KEY) as environment variables in the dashboard. Backend binds 0.0.0.0:8001; all routes under /api.
 
 ## Backlog / Remaining
 - P1: Streaming chat responses (token-by-token) for faster feel.
