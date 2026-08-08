@@ -9,6 +9,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
+  Modal,
 } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
@@ -122,6 +123,26 @@ export default function ProjectScreen() {
       {tab === "github" && (
         <GithubTab id={id!} show={show} hasFiles={(project?.files?.length || 0) > 0} />
       )}
+
+      <Modal visible={confirmDel} transparent animationType="fade" onRequestClose={() => setConfirmDel(false)}>
+        <View style={styles.confirmWrap}>
+          <View style={styles.confirmCard}>
+            <Ionicons name="trash" size={30} color={colors.danger} />
+            <Text style={styles.confirmTitle}>Ștergi acest chat?</Text>
+            <Text style={styles.confirmText}>
+              Conversația și tot codul generat se șterg definitiv.
+            </Text>
+            <View style={styles.confirmRow}>
+              <Pressable style={[styles.confirmBtn, styles.cancelBtn]} onPress={() => setConfirmDel(false)}>
+                <Text style={styles.cancelText}>Anulează</Text>
+              </Pressable>
+              <Pressable testID="confirm-delete-chat" style={[styles.confirmBtn, styles.delBtn]} onPress={removeProject}>
+                <Text style={styles.delText}>Șterge</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
       {Toast}
     </View>
   );
