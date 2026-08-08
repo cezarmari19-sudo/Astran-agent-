@@ -36,9 +36,6 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
 
-# In-memory store for background review jobs: {job_id: {...}}
-review_jobs: dict = {}
-
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -272,26 +269,16 @@ async def project_chat(pid: str, body: ChatIn):
             "message": clean(ai_msg)}
 
 
-# ---------------- Review (background job + polling) ----------------
-async def run_review_job(job_id: str, pid: str):
-    job = review_jobs[job_id]
+REVIEW_JOBS = {}
+
+
+async def _run_review(job_id, pid):
+    job = REVIEW_JOBS[job_id]
     try:
         project = await db.projects.find_one({"id": pid})
-        if not project:
-            job["status"] = "error"
-            job["error"] = "Proiect inexistent"
-            return
-
-        files = project.get("files", [])
-        if not files:
-            job["status"] = "error"
-            job["error"] = "Nu exista cod de verificat. Genereaza intai o aplicatie in chat."
-            return
-
+        current = {f["path"]: f["content"] for f in project.get("files", [])}
         clean_streak = 0
-        max_passes = 12  # background job has no HTTP timeout, so we can allow more passes
-        current = {f["path"]: f["content"] for f in files}
-
+        max_passes = 8  # generous cap; loops until clean + 2 confirmations
         for i in range(max_passes):
             blob = "\n\n".join([f"### FILE: {p}\n```\n{c}\n```" for p, c in current.items()])
             prompt = f"Review pass #{i+1}. Current project files:\n\n{blob}"
@@ -306,32 +293,27 @@ async def run_review_job(job_id: str, pid: str):
             for f in fixed:
                 if f.get("path"):
                     current[f["path"]] = f.get("content", current.get(f["path"], ""))
-
             job["passes"].append({"pass": i + 1, "issues": issues,
-                                   "summary": data.get("summary", ""),
-                                   "fixed_count": len(fixed)})
-
-            # persist partial progress so files aren't lost if the job is interrupted
-            partial_files = [{"path": p, "content": c} for p, c in current.items()]
-            await db.projects.update_one({"id": pid},
-                                         {"$set": {"files": partial_files, "updated_at": now_iso()}})
-
+                                  "summary": data.get("summary", ""),
+                                  "fixed_count": len(fixed)})
             if not issues:
                 clean_streak += 1
             else:
                 clean_streak = 0
+            final_files = [{"path": p, "content": c} for p, c in current.items()]
+            await db.projects.update_one({"id": pid},
+                                         {"$set": {"files": final_files, "updated_at": now_iso()}})
+            job["files"] = final_files
+            # run until clean, then 2 more confirmation passes (3 consecutive clean total)
             if clean_streak >= 3:
+                job["stopped_clean"] = True
                 break
-
-        final_files = [{"path": p, "content": c} for p, c in current.items()]
-        job["files"] = final_files
-        job["stopped_clean"] = clean_streak >= 3
         job["total_passes"] = len(job["passes"])
-        job["status"] = "done"
+        job["done"] = True
     except Exception as e:
-        logger.error(f"Review job {job_id} failed: {e}")
-        job["status"] = "error"
+        logger.error(f"review job error: {e}")
         job["error"] = str(e)
+        job["done"] = True
 
 
 @api_router.post("/projects/{pid}/review")
@@ -341,27 +323,18 @@ async def start_review(pid: str, background_tasks: BackgroundTasks):
         raise HTTPException(404, "Proiect inexistent")
     if not project.get("files"):
         raise HTTPException(400, "Nu exista cod de verificat. Genereaza intai o aplicatie in chat.")
-
     job_id = str(uuid.uuid4())
-    review_jobs[job_id] = {
-        "id": job_id,
-        "project_id": pid,
-        "status": "running",
-        "passes": [],
-        "files": [],
-        "stopped_clean": False,
-        "total_passes": 0,
-        "error": None,
-        "created_at": now_iso(),
-    }
-    background_tasks.add_task(run_review_job, job_id, pid)
-    return {"job_id": job_id, "status": "running"}
+    REVIEW_JOBS[job_id] = {"job_id": job_id, "project_id": pid, "passes": [],
+                           "files": [], "done": False, "error": None,
+                           "stopped_clean": False, "total_passes": 0}
+    background_tasks.add_task(_run_review, job_id, pid)
+    return {"job_id": job_id}
 
 
-@api_router.get("/projects/{pid}/review/{job_id}")
-async def get_review_status(pid: str, job_id: str):
-    job = review_jobs.get(job_id)
-    if not job or job["project_id"] != pid:
+@api_router.get("/review/{job_id}")
+async def review_status(job_id: str):
+    job = REVIEW_JOBS.get(job_id)
+    if not job:
         raise HTTPException(404, "Job inexistent")
     return job
 
