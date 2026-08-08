@@ -27,7 +27,7 @@ db = client[os.environ['DB_NAME']]
 
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
-GEMINI_MODEL = "gemini-3.1-pro-preview"
+GEMINI_MODEL = "gemini-2.5-flash"
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
