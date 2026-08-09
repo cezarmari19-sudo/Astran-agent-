@@ -122,24 +122,140 @@ BUILDER_SYSTEM = (
     "For questions that are not code, answer helpfully and concisely like a great engineer."
 )
 
-REVIEW_SYSTEM = (
-    "You are a review orchestrator running THREE specialized agents on a generated app's source code. "
-    "Evaluate the APP (not yourself) from three angles and tag every issue with its agent category:\n"
-    "1. category=\"human\": Does the app look HUMAN-made, not AI-generated slop? Flag generic centered "
-    "layouts, purple-on-white gradients, emoji-as-icons, boilerplate copy, cookie-cutter structure, "
-    "everything that screams 'AI wrote this'.\n"
-    "2. category=\"beauty\": Is the UI/UX genuinely beautiful and polished? Flag weak spacing, poor color/"
-    "contrast, no depth/hierarchy, ugly components, missing states, bad typography.\n"
-    "3. category=\"security\": BRUTE-FORCE / hacker perspective. Find bugs & vulnerabilities an attacker "
-    "would exploit for themselves: exposed secrets/API keys, injection, missing auth/validation, insecure "
-    "storage, logic flaws, crashes, race conditions.\n"
-    "Then FIX every issue you can. Respond with STRICT JSON only, no markdown:\n"
-    '{"issues":[{"category":"human|beauty|security","severity":"high|medium|low","file":"path",'
-    '"description":"...","fix":"..."}],"files":[{"path":"...","content":"<full corrected file>"}],"summary":"..."}\n'
-    "If the app is genuinely clean across all three agents, return "
-    '{"issues":[],"files":[],"summary":"No issues found."}. '
-    "Only include files in \"files\" that you actually changed, with their FULL new content."
-)
+
+# ---------------- 8 specialized review agents ----------------
+AGENT_DEFS = [
+    {
+        "key": "bruteforce",
+        "label": "Brute-force / Bug hunter",
+        "system": (
+            "You are a brute-force bug hunter reviewing a generated app's source code. "
+            "Find real bugs: crashes, unhandled errors, broken logic, race conditions, null/undefined "
+            "access, off-by-one errors, broken async flows. Do NOT comment on design or security secrets "
+            "here — only functional bugs. Fix every bug you find.\n"
+            "Respond with STRICT JSON only, no markdown:\n"
+            '{"issues":[{"severity":"high|medium|low","file":"path","description":"...","fix":"..."}],'
+            '"files":[{"path":"...","content":"<full corrected file>"}],"summary":"..."}\n'
+            "If genuinely no bugs, return "
+            '{"issues":[],"files":[],"summary":"No bugs found."}. '
+            "Only include files you actually changed, with FULL new content."
+        ),
+    },
+    {
+        "key": "beauty",
+        "label": "Design / Beauty",
+        "system": (
+            "You are a senior product designer reviewing whether a generated app's UI is genuinely "
+            "beautiful and polished. Flag weak spacing, poor color/contrast, no visual hierarchy, ugly "
+            "or inconsistent components, missing loading/empty/error states, bad typography choices. "
+            "Fix every issue you find with real design improvements.\n"
+            "Respond with STRICT JSON only, no markdown:\n"
+            '{"issues":[{"severity":"high|medium|low","file":"path","description":"...","fix":"..."}],'
+            '"files":[{"path":"...","content":"<full corrected file>"}],"summary":"..."}\n'
+            "If genuinely beautiful already, return "
+            '{"issues":[],"files":[],"summary":"Design is solid."}. '
+            "Only include files you actually changed, with FULL new content."
+        ),
+    },
+    {
+        "key": "human",
+        "label": "Looks human, not AI-slop",
+        "system": (
+            "You are reviewing whether a generated app looks HUMAN-made rather than generic AI output. "
+            "Flag: purple-on-white gradients, generic centered layouts, emoji used as icons, boilerplate "
+            "placeholder copy, cookie-cutter structure, anything that screams 'AI wrote this'. "
+            "Fix every issue you find so the app feels like it was crafted by a real product team.\n"
+            "Respond with STRICT JSON only, no markdown:\n"
+            '{"issues":[{"severity":"high|medium|low","file":"path","description":"...","fix":"..."}],'
+            '"files":[{"path":"...","content":"<full corrected file>"}],"summary":"..."}\n'
+            "If it already looks human-made, return "
+            '{"issues":[],"files":[],"summary":"Looks human-made."}. '
+            "Only include files you actually changed, with FULL new content."
+        ),
+    },
+    {
+        "key": "normal_user",
+        "label": "Plays as a normal user",
+        "system": (
+            "You are simulating a NORMAL, non-technical user trying to use this generated app. Since you "
+            "cannot literally run the app, carefully trace through the code as if playing it: follow what "
+            "happens on every screen, every button press, every navigation, every form submission. Find "
+            "points where a normal user would get confused, stuck, see a blank/broken state, or hit a "
+            "dead end. Fix every issue you find.\n"
+            "Respond with STRICT JSON only, no markdown:\n"
+            '{"issues":[{"severity":"high|medium|low","file":"path","description":"...","fix":"..."}],'
+            '"files":[{"path":"...","content":"<full corrected file>"}],"summary":"..."}\n'
+            "If a normal user could use this smoothly end-to-end, return "
+            '{"issues":[],"files":[],"summary":"Smooth for a normal user."}. '
+            "Only include files you actually changed, with FULL new content."
+        ),
+    },
+    {
+        "key": "server_secrets",
+        "label": "Server-side secret exposure",
+        "system": (
+            "You are an attacker trying to extract anything that should be server-side-only: API keys, "
+            "secrets, tokens, internal URLs, credentials. Check if any secret is hardcoded in client code, "
+            "sent to the client unnecessarily, logged, or exposed via an endpoint that leaks more than it "
+            "should. Fix every exposure you find by moving secrets server-side and removing leaks.\n"
+            "Respond with STRICT JSON only, no markdown:\n"
+            '{"issues":[{"severity":"high|medium|low","file":"path","description":"...","fix":"..."}],'
+            '"files":[{"path":"...","content":"<full corrected file>"}],"summary":"..."}\n'
+            "If nothing is exposed, return "
+            '{"issues":[],"files":[],"summary":"No secret exposure found."}. '
+            "Only include files you actually changed, with FULL new content."
+        ),
+    },
+    {
+        "key": "static_code_review",
+        "label": "Static code review",
+        "system": (
+            "You are doing a careful line-by-line static code review of the source files. Look for code "
+            "smells, unused variables, dead code, inconsistent patterns, missing error handling, type "
+            "mismatches, and anything a senior engineer would flag in a real code review. Fix what you "
+            "find.\n"
+            "Respond with STRICT JSON only, no markdown:\n"
+            '{"issues":[{"severity":"high|medium|low","file":"path","description":"...","fix":"..."}],'
+            '"files":[{"path":"...","content":"<full corrected file>"}],"summary":"..."}\n'
+            "If the code is clean, return "
+            '{"issues":[],"files":[],"summary":"Code is clean."}. '
+            "Only include files you actually changed, with FULL new content."
+        ),
+    },
+    {
+        "key": "cheater",
+        "label": "Cheating / exploit user",
+        "system": (
+            "You are a user trying to CHEAT the app to gain an unfair advantage: bypassing validation, "
+            "manipulating client-side state to unlock things, sending malformed or crafted requests to "
+            "the backend, exploiting logic to get free access, skip payment, or manipulate scores/results. "
+            "Trace through the code to find where this is possible and fix it (add server-side validation, "
+            "close logic gaps).\n"
+            "Respond with STRICT JSON only, no markdown:\n"
+            '{"issues":[{"severity":"high|medium|low","file":"path","description":"...","fix":"..."}],'
+            '"files":[{"path":"...","content":"<full corrected file>"}],"summary":"..."}\n'
+            "If nothing is exploitable, return "
+            '{"issues":[],"files":[],"summary":"No exploitable cheats found."}. '
+            "Only include files you actually changed, with FULL new content."
+        ),
+    },
+    {
+        "key": "hacker",
+        "label": "Hacker / security break-in",
+        "system": (
+            "You are a hacker trying to break into this app's server and database, and attack the client "
+            "side: injection attacks, missing auth checks on endpoints, insecure direct object references, "
+            "CORS misconfiguration, XSS, insecure storage of sensitive data on-device, unvalidated input "
+            "reaching the database. Fix every vulnerability you find.\n"
+            "Respond with STRICT JSON only, no markdown:\n"
+            '{"issues":[{"severity":"high|medium|low","file":"path","description":"...","fix":"..."}],'
+            '"files":[{"path":"...","content":"<full corrected file>"}],"summary":"..."}\n'
+            "If nothing is vulnerable, return "
+            '{"issues":[],"files":[],"summary":"No vulnerabilities found."}. '
+            "Only include files you actually changed, with FULL new content."
+        ),
+    },
+]
 
 
 def parse_files(text):
@@ -285,7 +401,7 @@ async def get_messages(pid: str):
 
 
 @api_router.post("/projects/{pid}/chat")
-async def project_chat(pid: str, body: ChatIn):
+async def project_chat(pid: str, body: ChatIn, background_tasks: BackgroundTasks):
     project = await db.projects.find_one({"id": pid})
     if not project:
         raise HTTPException(404, "Proiect inexistent")
@@ -316,11 +432,72 @@ async def project_chat(pid: str, body: ChatIn):
         await db.projects.update_one({"id": pid},
                                      {"$set": {"files": merged, "updated_at": now_iso()}})
 
+    auto_job_id = None
+    if new_files:
+        # Auto-trigger the 8-agent review loop whenever new code was generated,
+        # using the SAME model the user picked for this chat message.
+        auto_job_id = str(uuid.uuid4())
+        REVIEW_JOBS[auto_job_id] = _new_review_job(auto_job_id, pid)
+        background_tasks.add_task(_run_review, auto_job_id, pid, body.model)
+
     return {"reply": reply, "files": new_files, "all_files": merged,
-            "message": clean(ai_msg)}
+            "message": clean(ai_msg), "auto_review_job_id": auto_job_id}
 
 
 REVIEW_JOBS = {}
+
+
+def _new_review_job(job_id, pid):
+    return {
+        "job_id": job_id,
+        "project_id": pid,
+        "agents": {a["key"]: {"label": a["label"], "clean_streak": 0, "done": False} for a in AGENT_DEFS},
+        "passes": [],           # log of every individual agent pass
+        "phase": "main",        # "main" | "final" | "complete"
+        "final_round": 0,       # 0, 1 (2x), 2 (2x), 3 (1x) within the 2-2-1 sequence
+        "files": [],
+        "done": False,
+        "error": None,
+        "total_passes": 0,
+    }
+
+
+async def _run_single_agent_pass(pid, model, job, agent_def, current_files, pass_label):
+    """Run one pass of one agent against current_files (dict path->content).
+    Mutates current_files in place with any fixes. Returns True if issues were found."""
+    blob = "\n\n".join([f"### FILE: {p}\n```\n{c}\n```" for p, c in current_files.items()])
+    prompt = f"{pass_label} — Current project files:\n\n{blob}"
+    raw = await llm_generate(agent_def["system"], prompt, f"review-{pid}-{agent_def['key']}", model)
+    data = extract_json(raw)
+    if not data:
+        data = {"issues": [{"severity": "low", "file": "-",
+                            "description": "Agentul a raspuns in format liber.",
+                            "fix": raw[:500]}], "files": [], "summary": "Format neuzual."}
+    issues = data.get("issues", [])
+    fixed = data.get("files", [])
+    for f in fixed:
+        if f.get("path"):
+            current_files[f["path"]] = f.get("content", current_files.get(f["path"], ""))
+
+    job["passes"].append({
+        "agent": agent_def["key"],
+        "agent_label": agent_def["label"],
+        "label": pass_label,
+        "issues": issues,
+        "summary": data.get("summary", ""),
+        "fixed_count": len(fixed),
+    })
+    job["total_passes"] = len(job["passes"])
+
+    # persist progress after every single agent pass
+    return len(issues) > 0
+
+
+async def _persist(pid, job, current_files):
+    final_files = [{"path": p, "content": c} for p, c in current_files.items()]
+    await db.projects.update_one({"id": pid},
+                                 {"$set": {"files": final_files, "updated_at": now_iso()}})
+    job["files"] = final_files
 
 
 async def _run_review(job_id, pid, model=None):
@@ -328,38 +505,61 @@ async def _run_review(job_id, pid, model=None):
     try:
         project = await db.projects.find_one({"id": pid})
         current = {f["path"]: f["content"] for f in project.get("files", [])}
-        clean_streak = 0
-        max_passes = 8  # generous cap; loops until clean + 2 confirmations
-        for i in range(max_passes):
-            blob = "\n\n".join([f"### FILE: {p}\n```\n{c}\n```" for p, c in current.items()])
-            prompt = f"Review pass #{i+1}. Current project files:\n\n{blob}"
-            raw = await llm_generate(REVIEW_SYSTEM, prompt, f"review-{pid}-{i}", model)
-            data = extract_json(raw)
-            if not data:
-                data = {"issues": [{"severity": "low", "file": "-",
-                                    "description": "Agentul a raspuns in format liber.",
-                                    "fix": raw[:500]}], "files": [], "summary": "Format neuzual."}
-            issues = data.get("issues", [])
-            fixed = data.get("files", [])
-            for f in fixed:
-                if f.get("path"):
-                    current[f["path"]] = f.get("content", current.get(f["path"], ""))
-            job["passes"].append({"pass": i + 1, "issues": issues,
-                                  "summary": data.get("summary", ""),
-                                  "fixed_count": len(fixed)})
-            if not issues:
-                clean_streak += 1
-            else:
-                clean_streak = 0
-            final_files = [{"path": p, "content": c} for p, c in current.items()]
-            await db.projects.update_one({"id": pid},
-                                         {"$set": {"files": final_files, "updated_at": now_iso()}})
-            job["files"] = final_files
-            # run until clean, then 2 more confirmation passes (3 consecutive clean total)
-            if clean_streak >= 3:
-                job["stopped_clean"] = True
+        max_main_rounds = 30  # safety cap on the adaptive main phase
+
+        # ---------------- MAIN PHASE ----------------
+        # Each of the 8 agents runs in order, repeatedly, until it individually
+        # reaches 2 consecutive clean passes. Any fix is immediately visible to
+        # the next agent in the same round.
+        for round_num in range(max_main_rounds):
+            any_agent_still_active = False
+            for agent_def in AGENT_DEFS:
+                astate = job["agents"][agent_def["key"]]
+                if astate["done"]:
+                    continue
+                any_agent_still_active = True
+                found_issue = await _run_single_agent_pass(
+                    pid, model, job, agent_def, current,
+                    f"Main round {round_num + 1} — {agent_def['label']}"
+                )
+                await _persist(pid, job, current)
+                if found_issue:
+                    astate["clean_streak"] = 0
+                else:
+                    astate["clean_streak"] += 1
+                    if astate["clean_streak"] >= 2:
+                        astate["done"] = True
+            if not any_agent_still_active:
                 break
-        job["total_passes"] = len(job["passes"])
+
+        job["phase"] = "final"
+
+        # ---------------- FINAL 2-2-1 CONFIRMATION SEQUENCE ----------------
+        # If ANY agent finds an issue anywhere in this sequence, the fix is
+        # applied and the ENTIRE 2-2-1 sequence restarts from the beginning.
+        final_pattern = [2, 2, 1]
+        max_final_restarts = 15  # safety cap
+        restarts = 0
+        while restarts < max_final_restarts:
+            sequence_clean = True
+            for stage_index, repeats in enumerate(final_pattern):
+                for rep in range(repeats):
+                    for agent_def in AGENT_DEFS:
+                        found_issue = await _run_single_agent_pass(
+                            pid, model, job, agent_def, current,
+                            f"Final confirmation stage {stage_index + 1}/3 "
+                            f"(pass {rep + 1}/{repeats}) — {agent_def['label']}"
+                        )
+                        await _persist(pid, job, current)
+                        if found_issue:
+                            sequence_clean = False
+                if not sequence_clean:
+                    break
+            if sequence_clean:
+                break
+            restarts += 1
+
+        job["phase"] = "complete"
         job["done"] = True
     except Exception as e:
         logger.error(f"review job error: {e}")
@@ -375,9 +575,7 @@ async def start_review(pid: str, body: ReviewIn, background_tasks: BackgroundTas
     if not project.get("files"):
         raise HTTPException(400, "Nu exista cod de verificat. Genereaza intai o aplicatie in chat.")
     job_id = str(uuid.uuid4())
-    REVIEW_JOBS[job_id] = {"job_id": job_id, "project_id": pid, "passes": [],
-                           "files": [], "done": False, "error": None,
-                           "stopped_clean": False, "total_passes": 0}
+    REVIEW_JOBS[job_id] = _new_review_job(job_id, pid)
     background_tasks.add_task(_run_review, job_id, pid, body.model)
     return {"job_id": job_id}
 
