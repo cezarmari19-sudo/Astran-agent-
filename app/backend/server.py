@@ -95,15 +95,15 @@ async def llm_generate(system_message, prompt, session_id, model=None):
 
 
 AVAILABLE_MODELS = [
-    {"id": "gemini-3.5-flash", "label": "Gemini 3.5 Flash", "hint": "Rapid • cheia ta Gemini"},
-    {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash", "hint": "Rapid • cheia ta Gemini"},
-    {"id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro", "hint": "Puternic • cheia ta Gemini"},
-    {"id": "claude-sonnet-5", "label": "Claude Sonnet 5", "hint": "Cheie Anthropic"},
-    {"id": "claude-opus-4-8", "label": "Claude Opus 4.8", "hint": "Cheie Anthropic"},
-    {"id": "claude-fable-5", "label": "Claude Fable 5", "hint": "Cheie Anthropic"},
-    {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "hint": "Cheie Anthropic"},
-    {"id": "gpt-5.5", "label": "ChatGPT 5.5", "hint": "Cheie OpenAI"},
-    {"id": "gpt-5.4", "label": "ChatGPT 5.4", "hint": "Cheie OpenAI"},
+    {"id": "gemini-3.5-flash", "label": "Gemini 3.5 Flash", "hint": "Rapid • cheia ta Gemini", "provider": "gemini"},
+    {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash", "hint": "Rapid • cheia ta Gemini", "provider": "gemini"},
+    {"id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro", "hint": "Puternic • cheia ta Gemini", "provider": "gemini"},
+    {"id": "claude-sonnet-5", "label": "Claude Sonnet 5", "hint": "Cheie Anthropic", "provider": "anthropic"},
+    {"id": "claude-opus-4-8", "label": "Claude Opus 4.8", "hint": "Cheie Anthropic", "provider": "anthropic"},
+    {"id": "claude-fable-5", "label": "Claude Fable 5", "hint": "Cheie Anthropic", "provider": "anthropic"},
+    {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "hint": "Cheie Anthropic", "provider": "anthropic"},
+    {"id": "gpt-5.5", "label": "ChatGPT 5.5", "hint": "Cheie OpenAI", "provider": "openai"},
+    {"id": "gpt-5.4", "label": "ChatGPT 5.4", "hint": "Cheie OpenAI", "provider": "openai"},
 ]
 
 
@@ -230,7 +230,16 @@ async def health():
 
 @api_router.get("/models")
 async def list_models():
-    return {"models": AVAILABLE_MODELS, "default": GEMINI_MODEL}
+    return {
+        "models": AVAILABLE_MODELS,
+        "default": GEMINI_MODEL,
+        "providers_available": {
+            "gemini": bool(GEMINI_API_KEY),
+            "anthropic": bool(ANTHROPIC_API_KEY),
+            "openai": bool(OPENAI_API_KEY),
+        },
+        "emergent_fallback": bool(EMERGENT_LLM_KEY),
+    }
 
 
 # Projects
