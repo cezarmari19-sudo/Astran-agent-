@@ -158,7 +158,13 @@ export default function ProjectScreen() {
       )}
       {tab === "files" && <FilesTab files={project?.files || []} />}
       {tab === "review" && (
-        <ReviewTab id={id!} onDone={load} show={show} hasFiles={(project?.files?.length || 0) > 0} />
+        <ReviewTab
+          id={id!}
+          onDone={load}
+          show={show}
+          hasFiles={(project?.files?.length || 0) > 0}
+          model={model}
+        />
       )}
       {tab === "github" && (
         <GithubTab id={id!} show={show} hasFiles={(project?.files?.length || 0) > 0} />
@@ -180,34 +186,6 @@ export default function ProjectScreen() {
                 <Text style={styles.delText}>Șterge</Text>
               </Pressable>
             </View>
-          </View>
-        </View>
-      </Modal>
-
-      <Modal visible={modelSheet} transparent animationType="slide" onRequestClose={() => setModelSheet(false)}>
-        <View style={styles.modelWrap}>
-          <Pressable style={{ flex: 1 }} onPress={() => setModelSheet(false)} />
-          <View style={styles.modelSheet}>
-            <View style={styles.mHandle} />
-            <Text style={styles.modelTitle}>Alege modelul AI</Text>
-            <ScrollView style={{ maxHeight: 400 }}>
-              {models.map((m) => (
-                <Pressable
-                  key={m.id}
-                  testID={`model-${m.id}`}
-                  onPress={() => pickModel(m.id)}
-                  style={[styles.modelRow, model === m.id && styles.modelRowActive]}
-                >
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.modelLabel}>{m.label}</Text>
-                    <Text style={styles.modelHint}>{m.hint}</Text>
-                  </View>
-                  {model === m.id && (
-                    <Ionicons name="checkmark-circle" size={20} color={colors.accent} />
-                  )}
-                </Pressable>
-              ))}
-            </ScrollView>
           </View>
         </View>
       </Modal>
@@ -361,7 +339,7 @@ function FilesTab({ files }: { files: ProjFile[] }) {
   );
 }
 
-function ReviewTab({ id, onDone, show, hasFiles }: any) {
+function ReviewTab({ id, onDone, show, hasFiles, model }: any) {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<any>(null);
   const pollRef = useRef<any>(null);
@@ -372,7 +350,7 @@ function ReviewTab({ id, onDone, show, hasFiles }: any) {
     setRunning(true);
     setResult(null);
     try {
-      const { job_id } = await api.review(id);
+      const { job_id } = await api.review(id, model);
       pollRef.current = setInterval(async () => {
         try {
           const job = await api.reviewStatus(job_id);
