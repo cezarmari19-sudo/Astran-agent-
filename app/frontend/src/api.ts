@@ -45,7 +45,8 @@ export const api = {
       body: JSON.stringify({ message, model }),
     }),
   getModels: () => req("/models"),
-  review: (id: string) => req(`/projects/${id}/review`, { method: "POST" }),
+  review: (id: string, model?: string) =>
+    req(`/projects/${id}/review`, { method: "POST", body: JSON.stringify({ model }) }),
   reviewStatus: (jobId: string) => req(`/review/${jobId}`),
 
   listNotes: () => req("/notes"),
