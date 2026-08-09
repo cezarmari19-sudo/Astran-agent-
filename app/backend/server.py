@@ -71,8 +71,10 @@ async def llm_generate(system_message, prompt, session_id, model=None):
         provider = "openai"
 
     attempts = []
-    if provider == "gemini" and GEMINI_API_KEY:
-        attempts.append(GEMINI_API_KEY)
+    key_map = {"gemini": GEMINI_API_KEY, "anthropic": ANTHROPIC_API_KEY, "openai": OPENAI_API_KEY}
+    own = key_map.get(provider)
+    if own:
+        attempts.append(own)
     if EMERGENT_LLM_KEY:
         attempts.append(EMERGENT_LLM_KEY)
 
