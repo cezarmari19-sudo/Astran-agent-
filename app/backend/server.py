@@ -95,14 +95,15 @@ async def llm_generate(system_message, prompt, session_id, model=None):
 
 
 AVAILABLE_MODELS = [
-    {"id": "gemini-3.5-flash", "label": "Gemini 3.5 Flash", "hint": "Rapid • recomandat"},
-    {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash", "hint": "Rapid"},
-    {"id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro", "hint": "Puternic • poate cere plan"},
-    {"id": "gemini-2.5-pro", "label": "Gemini 2.5 Pro", "hint": "Puternic"},
-    {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "hint": "Necesită credit Emergent"},
-    {"id": "claude-haiku-4-5-20251001", "label": "Claude Haiku 4.5", "hint": "Necesită credit Emergent"},
-    {"id": "gpt-5.4", "label": "GPT-5.4", "hint": "Necesită credit Emergent"},
-    {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini", "hint": "Necesită credit Emergent"},
+    {"id": "gemini-3.5-flash", "label": "Gemini 3.5 Flash", "hint": "Rapid • cheia ta Gemini"},
+    {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash", "hint": "Rapid • cheia ta Gemini"},
+    {"id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro", "hint": "Puternic • cheia ta Gemini"},
+    {"id": "claude-sonnet-5", "label": "Claude Sonnet 5", "hint": "Cheie Anthropic"},
+    {"id": "claude-opus-4-8", "label": "Claude Opus 4.8", "hint": "Cheie Anthropic"},
+    {"id": "claude-fable-5", "label": "Claude Fable 5", "hint": "Cheie Anthropic"},
+    {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "hint": "Cheie Anthropic"},
+    {"id": "gpt-5.5", "label": "ChatGPT 5.5", "hint": "Cheie OpenAI"},
+    {"id": "gpt-5.4", "label": "ChatGPT 5.4", "hint": "Cheie OpenAI"},
 ]
 
 
