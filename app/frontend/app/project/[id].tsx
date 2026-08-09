@@ -33,6 +33,8 @@ export default function ProjectScreen() {
   const [confirmDel, setConfirmDel] = useState(false);
   const [model, setModel] = useState("gemini-3.5-flash");
   const [models, setModels] = useState<any[]>([]);
+  const [providersAvailable, setProvidersAvailable] = useState<any>({});
+  const [emergentFallback, setEmergentFallback] = useState(false);
   const [modelSheet, setModelSheet] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
 
@@ -66,6 +68,8 @@ export default function ProjectScreen() {
       try {
         const m = await api.getModels();
         setModels(m.models);
+        setProvidersAvailable(m.providers_available || {});
+        setEmergentFallback(!!m.emergent_fallback);
       } catch {}
     })();
   }, []);
@@ -151,6 +155,8 @@ export default function ProjectScreen() {
           scrollRef={scrollRef}
           model={model}
           models={models}
+          providersAvailable={providersAvailable}
+          emergentFallback={emergentFallback}
           showModels={modelSheet}
           onToggleModels={() => setModelSheet((s: boolean) => !s)}
           onPick={pickModel}
@@ -194,7 +200,21 @@ export default function ProjectScreen() {
   );
 }
 
-function ChatTab({ messages, sending, input, setInput, send, scrollRef, model, models, showModels, onToggleModels, onPick }: any) {
+function ChatTab({
+  messages,
+  sending,
+  input,
+  setInput,
+  send,
+  scrollRef,
+  model,
+  models,
+  providersAvailable,
+  emergentFallback,
+  showModels,
+  onToggleModels,
+  onPick,
+}: any) {
   return (
     <KeyboardAvoidingView
       style={{ flex: 1 }}
@@ -249,22 +269,35 @@ function ChatTab({ messages, sending, input, setInput, send, scrollRef, model, m
         {showModels && (
           <ScrollView style={styles.modelPanel} keyboardShouldPersistTaps="handled">
             <Text style={styles.modelPanelTitle}>Alege modelul AI</Text>
-            {(models || []).map((m: any) => (
-              <Pressable
-                key={m.id}
-                testID={`model-${m.id}`}
-                onPress={() => onPick(m.id)}
-                style={[styles.modelRow, model === m.id && styles.modelRowActive]}
-              >
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.modelLabel}>{m.label}</Text>
-                  <Text style={styles.modelHint}>{m.hint}</Text>
-                </View>
-                {model === m.id && (
-                  <Ionicons name="checkmark-circle" size={18} color={colors.accent} />
-                )}
-              </Pressable>
-            ))}
+            {(models || []).map((m: any) => {
+              const hasOwnKey = providersAvailable?.[m.provider];
+              const usable = hasOwnKey || emergentFallback;
+              return (
+                <Pressable
+                  key={m.id}
+                  testID={`model-${m.id}`}
+                  onPress={() => usable && onPick(m.id)}
+                  disabled={!usable}
+                  style={[
+                    styles.modelRow,
+                    model === m.id && styles.modelRowActive,
+                    !usable && styles.modelRowDisabled,
+                  ]}
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.modelLabel, !usable && styles.modelLabelDisabled]}>
+                      {m.label}
+                    </Text>
+                    <Text style={styles.modelHint}>
+                      {usable ? m.hint : `Necesită cheie ${m.provider} — adaugă în Setări`}
+                    </Text>
+                  </View>
+                  {model === m.id && usable && (
+                    <Ionicons name="checkmark-circle" size={18} color={colors.accent} />
+                  )}
+                </Pressable>
+              );
+            })}
           </ScrollView>
         )}
         <Pressable testID="model-pill" onPress={onToggleModels} style={styles.modelPill}>
@@ -810,6 +843,8 @@ const styles = StyleSheet.create({
     marginBottom: space.sm,
   },
   modelRowActive: { borderColor: colors.accent },
+  modelRowDisabled: { opacity: 0.4 },
   modelLabel: { color: colors.text, fontSize: 15, fontWeight: "700" },
+  modelLabelDisabled: { color: colors.faint },
   modelHint: { color: colors.muted, fontSize: 12, marginTop: 2 },
 });
