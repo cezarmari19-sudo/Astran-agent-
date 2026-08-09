@@ -31,6 +31,9 @@ export default function ProjectScreen() {
   const [sending, setSending] = useState(false);
   const [tab, setTab] = useState<Tab>("chat");
   const [confirmDel, setConfirmDel] = useState(false);
+  const [model, setModel] = useState("gemini-3.5-flash");
+  const [models, setModels] = useState<any[]>([]);
+  const [modelSheet, setModelSheet] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
 
   const removeProject = async () => {
@@ -56,6 +59,23 @@ export default function ProjectScreen() {
     load();
   }, [load]);
 
+  useEffect(() => {
+    (async () => {
+      const saved = await storage.getItem("chat_model", "");
+      if (saved) setModel(saved as string);
+      try {
+        const m = await api.getModels();
+        setModels(m.models);
+      } catch {}
+    })();
+  }, []);
+
+  const pickModel = async (id: string) => {
+    setModel(id);
+    setModelSheet(false);
+    await storage.setItem("chat_model", id);
+  };
+
   const send = async () => {
     const text = input.trim();
     if (!text || sending) return;
@@ -70,7 +90,7 @@ export default function ProjectScreen() {
     setSending(true);
     setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
     try {
-      const res = await api.chat(id!, text);
+      const res = await api.chat(id!, text, model);
       setMessages((m) => [...m, res.message]);
       if (res.all_files) setProject((p) => (p ? { ...p, files: res.all_files } : p));
     } catch (e: any) {
@@ -129,6 +149,8 @@ export default function ProjectScreen() {
           setInput={setInput}
           send={send}
           scrollRef={scrollRef}
+          model={model}
+          onOpenModel={() => setModelSheet(true)}
         />
       )}
       {tab === "files" && <FilesTab files={project?.files || []} />}
@@ -158,12 +180,40 @@ export default function ProjectScreen() {
           </View>
         </View>
       </Modal>
+
+      <Modal visible={modelSheet} transparent animationType="slide" onRequestClose={() => setModelSheet(false)}>
+        <View style={styles.modelWrap}>
+          <Pressable style={{ flex: 1 }} onPress={() => setModelSheet(false)} />
+          <View style={styles.modelSheet}>
+            <View style={styles.mHandle} />
+            <Text style={styles.modelTitle}>Alege modelul AI</Text>
+            <ScrollView style={{ maxHeight: 400 }}>
+              {models.map((m) => (
+                <Pressable
+                  key={m.id}
+                  testID={`model-${m.id}`}
+                  onPress={() => pickModel(m.id)}
+                  style={[styles.modelRow, model === m.id && styles.modelRowActive]}
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.modelLabel}>{m.label}</Text>
+                    <Text style={styles.modelHint}>{m.hint}</Text>
+                  </View>
+                  {model === m.id && (
+                    <Ionicons name="checkmark-circle" size={20} color={colors.accent} />
+                  )}
+                </Pressable>
+              ))}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
       {Toast}
     </View>
   );
 }
 
-function ChatTab({ messages, sending, input, setInput, send, scrollRef }: any) {
+function ChatTab({ messages, sending, input, setInput, send, scrollRef, model, onOpenModel }: any) {
   return (
     <KeyboardAvoidingView
       style={{ flex: 1 }}
@@ -215,23 +265,32 @@ function ChatTab({ messages, sending, input, setInput, send, scrollRef }: any) {
         )}
       </ScrollView>
       <View style={styles.inputBar}>
-        <TextInput
-          testID="chat-input"
-          style={styles.chatInput}
-          placeholder="Scrie ce vrei să construiască Aria…"
-          placeholderTextColor={colors.faint}
-          value={input}
-          onChangeText={setInput}
-          multiline
-        />
-        <Pressable
-          testID="chat-send"
-          onPress={send}
-          disabled={sending}
-          style={({ pressed }) => [styles.sendBtn, pressed && { opacity: 0.8 }]}
-        >
-          <Ionicons name="arrow-up" size={22} color="#04140B" />
+        <Pressable testID="model-pill" onPress={onOpenModel} style={styles.modelPill}>
+          <Ionicons name="flash" size={14} color={colors.accent} />
+          <Text style={styles.modelPillText} numberOfLines={1}>
+            {model}
+          </Text>
+          <Ionicons name="chevron-up" size={12} color={colors.faint} />
         </Pressable>
+        <View style={styles.inputRow}>
+          <TextInput
+            testID="chat-input"
+            style={styles.chatInput}
+            placeholder="Scrie ce vrei să construiască Aria…"
+            placeholderTextColor={colors.faint}
+            value={input}
+            onChangeText={setInput}
+            multiline
+          />
+          <Pressable
+            testID="chat-send"
+            onPress={send}
+            disabled={sending}
+            style={({ pressed }) => [styles.sendBtn, pressed && { opacity: 0.8 }]}
+          >
+            <Ionicons name="arrow-up" size={22} color="#04140B" />
+          </Pressable>
+        </View>
       </View>
     </KeyboardAvoidingView>
   );
@@ -314,10 +373,12 @@ function ReviewTab({ id, onDone, show, hasFiles }: any) {
   return (
     <ScrollView contentContainerStyle={{ padding: space.md, paddingBottom: 40 }}>
       <View style={styles.infoCard}>
-        <Text style={styles.infoTitle}>Agent de verificare</Text>
+        <Text style={styles.infoTitle}>3 agenți de verificare</Text>
         <Text style={styles.infoText}>
-          Un singur agent foarte bun rulează în buclă: caută bug-uri, scurgeri de chei,
-          UI generic și le repară. Se oprește după 3 treceri consecutive fără probleme.
+          La fiecare trecere, aplicația generată e verificată de 3 agenți: 👤 Uman (arată
+          făcută de om, nu AI), ✨ Frumos (design & UX de calitate) și 🛡️ Securitate
+          (brute-force: bug-uri și vulnerabilități pe care un hacker le-ar exploata). Rulează
+          în buclă și repară, până 3 treceri la rând ies curate.
         </Text>
       </View>
       <PrimaryButton
@@ -355,7 +416,16 @@ function ReviewTab({ id, onDone, show, hasFiles }: any) {
                 <View key={idx} style={styles.issue}>
                   <View style={[styles.dot, sevColor(iss.severity)]} />
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.issueFile}>{iss.file}</Text>
+                    <View style={styles.issueTop}>
+                      <View style={[styles.catChip, { borderColor: catColor(iss.category) }]}>
+                        <Text style={[styles.catChipText, { color: catColor(iss.category) }]}>
+                          {catLabel(iss.category)}
+                        </Text>
+                      </View>
+                      <Text style={styles.issueFile} numberOfLines={1}>
+                        {iss.file}
+                      </Text>
+                    </View>
                     <Text style={styles.issueDesc}>{iss.description}</Text>
                     {iss.fix ? <Text style={styles.issueFix}>Fix: {iss.fix}</Text> : null}
                   </View>
@@ -493,6 +563,20 @@ function sevColor(sev: string) {
   return { backgroundColor: colors.accent2 };
 }
 
+function catColor(cat: string) {
+  if (cat === "human") return colors.accent2;
+  if (cat === "beauty") return "#C77DFF";
+  if (cat === "security") return colors.danger;
+  return colors.faint;
+}
+
+function catLabel(cat: string) {
+  if (cat === "human") return "👤 Uman";
+  if (cat === "beauty") return "✨ Frumos";
+  if (cat === "security") return "🛡️ Securitate";
+  return "Alt";
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.bg },
   center: { flex: 1, alignItems: "center", justifyContent: "center", padding: space.lg, gap: 10 },
@@ -546,15 +630,28 @@ const styles = StyleSheet.create({
   bubbleText: { color: colors.text, fontSize: 14, lineHeight: 21 },
   thinking: { color: colors.muted, marginTop: 8, fontSize: 13 },
   inputBar: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    gap: space.sm,
     padding: space.sm + 2,
     paddingBottom: space.md,
     borderTopWidth: 1,
     borderTopColor: colors.border,
     backgroundColor: colors.surface,
+    gap: space.sm,
   },
+  modelPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    gap: 6,
+    backgroundColor: colors.surface2,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.xl,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    maxWidth: "80%",
+  },
+  modelPillText: { color: colors.text, fontSize: 12, fontWeight: "700" },
+  inputRow: { flexDirection: "row", alignItems: "flex-end", gap: space.sm },
   chatInput: {
     flex: 1,
     maxHeight: 130,
@@ -614,6 +711,9 @@ const styles = StyleSheet.create({
   issue: { flexDirection: "row", gap: 8, marginTop: 10 },
   dot: { width: 8, height: 8, borderRadius: 4, marginTop: 5 },
   issueFile: { color: colors.accent2, fontSize: 12, fontWeight: "700" },
+  issueTop: { flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" },
+  catChip: { borderWidth: 1, borderRadius: 20, paddingHorizontal: 8, paddingVertical: 2 },
+  catChipText: { fontSize: 10, fontWeight: "800" },
   issueDesc: { color: colors.text, fontSize: 13, marginTop: 2, lineHeight: 18 },
   issueFix: { color: colors.muted, fontSize: 12, marginTop: 3, fontStyle: "italic" },
   passSummary: { color: colors.muted, fontSize: 12, marginTop: 10 },
@@ -662,4 +762,36 @@ const styles = StyleSheet.create({
   delBtn: { backgroundColor: colors.danger },
   cancelText: { color: colors.text, fontWeight: "800", fontSize: 15 },
   delText: { color: "#fff", fontWeight: "800", fontSize: 15 },
+  modelWrap: { flex: 1, backgroundColor: "rgba(0,0,0,0.55)" },
+  modelSheet: {
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    padding: space.lg,
+    paddingBottom: 40,
+    borderTopWidth: 1,
+    borderColor: colors.border,
+  },
+  mHandle: {
+    width: 44,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: colors.border,
+    alignSelf: "center",
+    marginBottom: space.md,
+  },
+  modelTitle: { color: colors.text, fontSize: 19, fontWeight: "800", marginBottom: space.sm },
+  modelRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: colors.surface2,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    padding: space.md,
+    marginBottom: space.sm,
+  },
+  modelRowActive: { borderColor: colors.accent },
+  modelLabel: { color: colors.text, fontSize: 15, fontWeight: "700" },
+  modelHint: { color: colors.muted, fontSize: 12, marginTop: 2 },
 });
