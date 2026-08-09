@@ -187,6 +187,10 @@ class ChatIn(BaseModel):
     model: Optional[str] = None
 
 
+class ReviewIn(BaseModel):
+    model: Optional[str] = None
+
+
 class NoteIn(BaseModel):
     title: str
     content: Optional[str] = ""
@@ -310,7 +314,7 @@ async def project_chat(pid: str, body: ChatIn):
 REVIEW_JOBS = {}
 
 
-async def _run_review(job_id, pid):
+async def _run_review(job_id, pid, model=None):
     job = REVIEW_JOBS[job_id]
     try:
         project = await db.projects.find_one({"id": pid})
@@ -320,7 +324,7 @@ async def _run_review(job_id, pid):
         for i in range(max_passes):
             blob = "\n\n".join([f"### FILE: {p}\n```\n{c}\n```" for p, c in current.items()])
             prompt = f"Review pass #{i+1}. Current project files:\n\n{blob}"
-            raw = await llm_generate(REVIEW_SYSTEM, prompt, f"review-{pid}-{i}")
+            raw = await llm_generate(REVIEW_SYSTEM, prompt, f"review-{pid}-{i}", model)
             data = extract_json(raw)
             if not data:
                 data = {"issues": [{"severity": "low", "file": "-",
@@ -355,7 +359,7 @@ async def _run_review(job_id, pid):
 
 
 @api_router.post("/projects/{pid}/review")
-async def start_review(pid: str, background_tasks: BackgroundTasks):
+async def start_review(pid: str, body: ReviewIn, background_tasks: BackgroundTasks):
     project = await db.projects.find_one({"id": pid})
     if not project:
         raise HTTPException(404, "Proiect inexistent")
@@ -365,7 +369,7 @@ async def start_review(pid: str, background_tasks: BackgroundTasks):
     REVIEW_JOBS[job_id] = {"job_id": job_id, "project_id": pid, "passes": [],
                            "files": [], "done": False, "error": None,
                            "stopped_clean": False, "total_passes": 0}
-    background_tasks.add_task(_run_review, job_id, pid)
+    background_tasks.add_task(_run_review, job_id, pid, body.model)
     return {"job_id": job_id}
 
 
