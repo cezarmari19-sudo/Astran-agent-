@@ -36,6 +36,7 @@ export default function ProjectScreen() {
   const [providersAvailable, setProvidersAvailable] = useState<any>({});
   const [emergentFallback, setEmergentFallback] = useState(false);
   const [modelSheet, setModelSheet] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
 
   const removeProject = async () => {
@@ -95,13 +96,30 @@ export default function ProjectScreen() {
     setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
     try {
       const res = await api.chat(id!, text, model);
-      setMessages((m) => [...m, res.message]);
-      if (res.all_files) setProject((p) => (p ? { ...p, files: res.all_files } : p));
+      if (res.stopped) {
+        setMessages((m) => m.filter((msg) => msg.id !== optimistic.id));
+        show("Oprit", "err");
+      } else {
+        setMessages((m) => [...m, res.message]);
+        if (res.all_files) setProject((p) => (p ? { ...p, files: res.all_files } : p));
+      }
     } catch (e: any) {
       show(e.message, "err");
     } finally {
       setSending(false);
       setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 60);
+    }
+  };
+
+  const stopEverything = async () => {
+    setStopping(true);
+    try {
+      await api.stop(id!);
+      show("Oprit");
+    } catch (e: any) {
+      show(e.message, "err");
+    } finally {
+      setStopping(false);
     }
   };
 
@@ -160,6 +178,8 @@ export default function ProjectScreen() {
           showModels={modelSheet}
           onToggleModels={() => setModelSheet((s: boolean) => !s)}
           onPick={pickModel}
+          onStop={stopEverything}
+          stopping={stopping}
         />
       )}
       {tab === "files" && <FilesTab files={project?.files || []} />}
@@ -170,6 +190,8 @@ export default function ProjectScreen() {
           show={show}
           hasFiles={(project?.files?.length || 0) > 0}
           model={model}
+          onStop={stopEverything}
+          stopping={stopping}
         />
       )}
       {tab === "github" && (
@@ -214,6 +236,8 @@ function ChatTab({
   showModels,
   onToggleModels,
   onPick,
+  onStop,
+  stopping,
 }: any) {
   return (
     <KeyboardAvoidingView
@@ -300,13 +324,21 @@ function ChatTab({
             })}
           </ScrollView>
         )}
-        <Pressable testID="model-pill" onPress={onToggleModels} style={styles.modelPill}>
-          <Ionicons name="flash" size={14} color={colors.accent} />
-          <Text style={styles.modelPillText} numberOfLines={1}>
-            {model}
-          </Text>
-          <Ionicons name={showModels ? "chevron-down" : "chevron-up"} size={13} color={colors.faint} />
-        </Pressable>
+        <View style={styles.pillRow}>
+          <Pressable testID="model-pill" onPress={onToggleModels} style={styles.modelPill}>
+            <Ionicons name="flash" size={14} color={colors.accent} />
+            <Text style={styles.modelPillText} numberOfLines={1}>
+              {model}
+            </Text>
+            <Ionicons name={showModels ? "chevron-down" : "chevron-up"} size={13} color={colors.faint} />
+          </Pressable>
+          {sending && (
+            <Pressable testID="stop-btn" onPress={onStop} disabled={stopping} style={styles.stopPill}>
+              <Ionicons name="stop-circle" size={14} color={colors.danger} />
+              <Text style={styles.stopPillText}>{stopping ? "Oprire…" : "Stop"}</Text>
+            </Pressable>
+          )}
+        </View>
         <View style={styles.inputRow}>
           <TextInput
             testID="chat-input"
@@ -372,7 +404,7 @@ function FilesTab({ files }: { files: ProjFile[] }) {
   );
 }
 
-function ReviewTab({ id, onDone, show, hasFiles, model }: any) {
+function ReviewTab({ id, onDone, show, hasFiles, model, onStop, stopping }: any) {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<any>(null);
   const pollRef = useRef<any>(null);
@@ -393,7 +425,8 @@ function ReviewTab({ id, onDone, show, hasFiles, model }: any) {
             setRunning(false);
             onDone();
             if (job.error) show("Eroare la verificare", "err");
-            else show(job.stopped_clean ? "Verificare completă — curat!" : "Verificare finalizată");
+            else if (job.phase === "stopped") show("Verificare oprită");
+            else show("Verificare completă — curat!");
           }
         } catch {
           /* keep polling */
@@ -408,34 +441,41 @@ function ReviewTab({ id, onDone, show, hasFiles, model }: any) {
   return (
     <ScrollView contentContainerStyle={{ padding: space.md, paddingBottom: 40 }}>
       <View style={styles.infoCard}>
-        <Text style={styles.infoTitle}>3 agenți de verificare</Text>
+        <Text style={styles.infoTitle}>8 agenți de verificare</Text>
         <Text style={styles.infoText}>
-          La fiecare trecere, aplicația generată e verificată de 3 agenți: 👤 Uman (arată
-          făcută de om, nu AI), ✨ Frumos (design & UX de calitate) și 🛡️ Securitate
-          (brute-force: bug-uri și vulnerabilități pe care un hacker le-ar exploata). Rulează
-          în buclă și repară, până 3 treceri la rând ies curate.
+          Fiecare rulare de cod pornește automat 8 agenți specializați (bug-uri, design,
+          arată uman, user normal, secrete server, code review static, cheat, hacker) —
+          rulează pe rând, în buclă, până fiecare confirmă de 2 ori la rând că e curat.
         </Text>
       </View>
-      <PrimaryButton
-        testID="run-review-btn"
-        title={running ? "Agentul rulează…" : "Rulează verificarea"}
-        icon="shield-checkmark"
-        loading={running}
-        disabled={!hasFiles || running}
-        onPress={run}
-      />
+      <View style={{ flexDirection: "row", gap: space.sm }}>
+        <View style={{ flex: 1 }}>
+          <PrimaryButton
+            testID="run-review-btn"
+            title={running ? "Agenții rulează…" : "Rulează verificarea"}
+            icon="shield-checkmark"
+            loading={running}
+            disabled={!hasFiles || running}
+            onPress={run}
+          />
+        </View>
+        {running && (
+          <Pressable testID="review-stop-btn" onPress={onStop} disabled={stopping} style={styles.stopBtn}>
+            <Ionicons name="stop-circle" size={20} color={colors.danger} />
+          </Pressable>
+        )}
+      </View>
       {!hasFiles && <Text style={styles.warnText}>Generează întâi cod în Chat.</Text>}
 
       {result && (
         <View style={{ marginTop: space.md }}>
           <Text style={styles.sectionTitle}>
-            {result.passes.length} treceri{" "}
-            {result.done ? (result.stopped_clean ? "• curat ✓" : "• finalizat") : "• în curs…"}
+            {result.total_passes} treceri • faza: {result.phase}
           </Text>
-          {result.passes.map((p: any) => (
-            <View key={p.pass} style={styles.passCard}>
+          {result.passes.map((p: any, idx: number) => (
+            <View key={idx} style={styles.passCard}>
               <View style={styles.passHead}>
-                <Text style={styles.passTitle}>Trecere #{p.pass}</Text>
+                <Text style={styles.passTitle}>{p.label}</Text>
                 <View
                   style={[
                     styles.badge,
@@ -447,20 +487,13 @@ function ReviewTab({ id, onDone, show, hasFiles, model }: any) {
                   </Text>
                 </View>
               </View>
-              {p.issues.map((iss: any, idx: number) => (
-                <View key={idx} style={styles.issue}>
+              {p.issues.map((iss: any, i2: number) => (
+                <View key={i2} style={styles.issue}>
                   <View style={[styles.dot, sevColor(iss.severity)]} />
                   <View style={{ flex: 1 }}>
-                    <View style={styles.issueTop}>
-                      <View style={[styles.catChip, { borderColor: catColor(iss.category) }]}>
-                        <Text style={[styles.catChipText, { color: catColor(iss.category) }]}>
-                          {catLabel(iss.category)}
-                        </Text>
-                      </View>
-                      <Text style={styles.issueFile} numberOfLines={1}>
-                        {iss.file}
-                      </Text>
-                    </View>
+                    <Text style={styles.issueFile} numberOfLines={1}>
+                      {iss.file}
+                    </Text>
                     <Text style={styles.issueDesc}>{iss.description}</Text>
                     {iss.fix ? <Text style={styles.issueFix}>Fix: {iss.fix}</Text> : null}
                   </View>
@@ -472,7 +505,7 @@ function ReviewTab({ id, onDone, show, hasFiles, model }: any) {
           {!result.done && (
             <View style={styles.liveRow}>
               <ActivityIndicator color={colors.accent} />
-              <Text style={styles.passSummary}>Agentul continuă verificarea…</Text>
+              <Text style={styles.passSummary}>Agenții continuă verificarea…</Text>
             </View>
           )}
         </View>
@@ -598,20 +631,6 @@ function sevColor(sev: string) {
   return { backgroundColor: colors.accent2 };
 }
 
-function catColor(cat: string) {
-  if (cat === "human") return colors.accent2;
-  if (cat === "beauty") return "#C77DFF";
-  if (cat === "security") return colors.danger;
-  return colors.faint;
-}
-
-function catLabel(cat: string) {
-  if (cat === "human") return "👤 Uman";
-  if (cat === "beauty") return "✨ Frumos";
-  if (cat === "security") return "🛡️ Securitate";
-  return "Alt";
-}
-
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.bg },
   center: { flex: 1, alignItems: "center", justifyContent: "center", padding: space.lg, gap: 10 },
@@ -672,6 +691,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
     gap: space.sm,
   },
+  pillRow: { flexDirection: "row", alignItems: "center", gap: space.sm },
   modelPill: {
     flexDirection: "row",
     alignItems: "center",
@@ -683,9 +703,29 @@ const styles = StyleSheet.create({
     borderRadius: radius.xl,
     paddingHorizontal: 12,
     paddingVertical: 6,
-    maxWidth: "80%",
+    maxWidth: "60%",
   },
   modelPillText: { color: colors.text, fontSize: 12, fontWeight: "700" },
+  stopPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: colors.surface2,
+    borderWidth: 1,
+    borderColor: colors.danger,
+    borderRadius: radius.xl,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  stopPillText: { color: colors.danger, fontSize: 12, fontWeight: "700" },
+  stopBtn: {
+    width: 50,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.danger,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   modelPanel: {
     maxHeight: 300,
     backgroundColor: colors.surface2,
@@ -756,15 +796,12 @@ const styles = StyleSheet.create({
     marginBottom: space.sm,
   },
   passHead: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  passTitle: { color: colors.text, fontWeight: "800" },
+  passTitle: { color: colors.text, fontWeight: "800", flex: 1, marginRight: space.sm },
   badge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20 },
   badgeText: { color: "#04140B", fontWeight: "800", fontSize: 11 },
   issue: { flexDirection: "row", gap: 8, marginTop: 10 },
   dot: { width: 8, height: 8, borderRadius: 4, marginTop: 5 },
   issueFile: { color: colors.accent2, fontSize: 12, fontWeight: "700" },
-  issueTop: { flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" },
-  catChip: { borderWidth: 1, borderRadius: 20, paddingHorizontal: 8, paddingVertical: 2 },
-  catChipText: { fontSize: 10, fontWeight: "800" },
   issueDesc: { color: colors.text, fontSize: 13, marginTop: 2, lineHeight: 18 },
   issueFix: { color: colors.muted, fontSize: 12, marginTop: 3, fontStyle: "italic" },
   passSummary: { color: colors.muted, fontSize: 12, marginTop: 10 },
