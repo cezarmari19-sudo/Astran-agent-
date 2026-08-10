@@ -18,7 +18,15 @@ import { Header, PrimaryButton, useToast } from "@/src/components";
 import { api, Project, ProjFile } from "@/src/api";
 import { storage } from "@/src/utils/storage";
 
-type Msg = { id: string; role: string; content: string; created_at: string };
+type ClarifyQuestion = { question: string; options: string[] };
+type Msg = {
+  id: string;
+  role: string;
+  content: string;
+  created_at: string;
+  msg_type?: "normal" | "clarify" | "clarify_answer";
+  questions?: ClarifyQuestion[];
+};
 type Tab = "chat" | "files" | "review" | "github";
 
 export default function ProjectScreen() {
@@ -81,15 +89,15 @@ export default function ProjectScreen() {
     await storage.setItem("chat_model", id);
   };
 
-  const send = async () => {
-    const text = input.trim();
-    if (!text || sending) return;
+  const sendText = async (text: string) => {
+    if (!text.trim() || sending) return;
     setInput("");
     const optimistic: Msg = {
       id: "tmp-" + Date.now(),
       role: "user",
       content: text,
       created_at: new Date().toISOString(),
+      msg_type: "normal",
     };
     setMessages((m) => [...m, optimistic]);
     setSending(true);
@@ -110,6 +118,9 @@ export default function ProjectScreen() {
       setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 60);
     }
   };
+
+  const send = () => sendText(input);
+  const pickAnswer = (text: string) => sendText(text);
 
   const stopEverything = async () => {
     setStopping(true);
@@ -170,6 +181,7 @@ export default function ProjectScreen() {
           input={input}
           setInput={setInput}
           send={send}
+          onPickAnswer={pickAnswer}
           scrollRef={scrollRef}
           model={model}
           models={models}
@@ -228,6 +240,7 @@ function ChatTab({
   input,
   setInput,
   send,
+  onPickAnswer,
   scrollRef,
   model,
   models,
@@ -239,6 +252,9 @@ function ChatTab({
   onStop,
   stopping,
 }: any) {
+  const lastMsg = messages[messages.length - 1];
+  const awaitingClarification = lastMsg && lastMsg.msg_type === "clarify" && !sending;
+
   return (
     <KeyboardAvoidingView
       style={{ flex: 1 }}
@@ -261,25 +277,62 @@ function ChatTab({
           </View>
         )}
         {messages.map((m: Msg) => (
-          <View
-            key={m.id}
-            testID={`msg-${m.role}`}
-            style={[styles.bubble, m.role === "user" ? styles.userBubble : styles.aiBubble]}
-          >
-            {m.role !== "user" && (
-              <View style={styles.aiTag}>
-                <View style={styles.brandDot} />
-                <Text style={styles.aiTagText}>Aria</Text>
-              </View>
-            )}
-            <Text
+          <View key={m.id}>
+            <View
+              testID={`msg-${m.role}`}
               style={[
-                styles.bubbleText,
-                m.role === "user" && { color: "#04140B" },
+                styles.bubble,
+                m.role === "user" ? styles.userBubble : styles.aiBubble,
+                m.msg_type === "clarify" && styles.clarifyBubble,
               ]}
             >
-              {m.content}
-            </Text>
+              {m.role !== "user" && (
+                <View style={styles.aiTag}>
+                  <View style={styles.brandDot} />
+                  <Text style={styles.aiTagText}>
+                    {m.msg_type === "clarify" ? "Aria — câteva detalii" : "Aria"}
+                  </Text>
+                </View>
+              )}
+              <Text
+                style={[
+                  styles.bubbleText,
+                  m.role === "user" && { color: "#04140B" },
+                ]}
+              >
+                {m.content}
+              </Text>
+            </View>
+
+            {m.msg_type === "clarify" && Array.isArray(m.questions) && (
+              <View style={styles.clarifyBlock}>
+                {m.questions.map((q: ClarifyQuestion, qi: number) => (
+                  <View key={qi} style={styles.clarifyQuestion}>
+                    <Text style={styles.clarifyQuestionText}>{q.question}</Text>
+                    <View style={styles.clarifyOptions}>
+                      {q.options.map((opt: string, oi: number) => (
+                        <Pressable
+                          key={oi}
+                          testID={`clarify-opt-${qi}-${oi}`}
+                          onPress={() => onPickAnswer(opt)}
+                          style={({ pressed }) => [
+                            styles.clarifyOptBtn,
+                            pressed && { opacity: 0.7 },
+                          ]}
+                        >
+                          <Text style={styles.clarifyOptText}>
+                            {oi + 1}. {opt}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  </View>
+                ))}
+                <Text style={styles.clarifyFreeHint}>
+                  Poți alege una din opțiuni sau scrie tu ce vrei mai jos.
+                </Text>
+              </View>
+            )}
           </View>
         ))}
         {sending && (
@@ -339,11 +392,23 @@ function ChatTab({
             </Pressable>
           )}
         </View>
+        {awaitingClarification && (
+          <View style={styles.clarifyNudge}>
+            <Ionicons name="help-circle-outline" size={14} color={colors.accent2} />
+            <Text style={styles.clarifyNudgeText}>
+              Alege o opțiune de mai sus sau scrie răspunsul tău
+            </Text>
+          </View>
+        )}
         <View style={styles.inputRow}>
           <TextInput
             testID="chat-input"
             style={styles.chatInput}
-            placeholder="Scrie ce vrei să construiască Aria…"
+            placeholder={
+              awaitingClarification
+                ? "Scrie răspunsul tău…"
+                : "Scrie ce vrei să construiască Aria…"
+            }
             placeholderTextColor={colors.faint}
             value={input}
             onChangeText={setInput}
@@ -678,11 +743,45 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     alignSelf: "flex-start",
   },
+  clarifyBubble: { borderColor: colors.accent2 },
   aiTag: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 6 },
   brandDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.accent },
   aiTagText: { color: colors.accent, fontSize: 12, fontWeight: "800" },
   bubbleText: { color: colors.text, fontSize: 14, lineHeight: 21 },
   thinking: { color: colors.muted, marginTop: 8, fontSize: 13 },
+  clarifyBlock: {
+    alignSelf: "flex-start",
+    maxWidth: "92%",
+    marginBottom: space.sm + 2,
+    marginTop: -8,
+    gap: space.sm,
+  },
+  clarifyQuestion: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    padding: space.sm + 2,
+  },
+  clarifyQuestionText: { color: colors.text, fontSize: 13, fontWeight: "700", marginBottom: 8 },
+  clarifyOptions: { gap: 6 },
+  clarifyOptBtn: {
+    backgroundColor: colors.surface2,
+    borderWidth: 1,
+    borderColor: colors.accent2,
+    borderRadius: radius.sm,
+    paddingVertical: 9,
+    paddingHorizontal: 12,
+  },
+  clarifyOptText: { color: colors.accent2, fontSize: 13, fontWeight: "700" },
+  clarifyFreeHint: { color: colors.faint, fontSize: 11, fontStyle: "italic", marginLeft: 4 },
+  clarifyNudge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginBottom: 2,
+  },
+  clarifyNudgeText: { color: colors.accent2, fontSize: 11, fontWeight: "600" },
   inputBar: {
     padding: space.sm + 2,
     paddingBottom: space.md,
