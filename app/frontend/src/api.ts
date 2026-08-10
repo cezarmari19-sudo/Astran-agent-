@@ -48,6 +48,7 @@ export const api = {
   review: (id: string, model?: string) =>
     req(`/projects/${id}/review`, { method: "POST", body: JSON.stringify({ model }) }),
   reviewStatus: (jobId: string) => req(`/review/${jobId}`),
+  stop: (id: string) => req(`/projects/${id}/stop?kind=both`, { method: "POST" }),
 
   listNotes: () => req("/notes"),
   createNote: (title: string, content: string) =>
