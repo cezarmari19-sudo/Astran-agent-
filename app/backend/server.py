@@ -10,6 +10,7 @@ import base64
 import logging
 import operator
 import uuid
+import asyncio
 import requests
 from pathlib import Path
 from pydantic import BaseModel
@@ -47,6 +48,29 @@ def clean(doc):
     if doc and "_id" in doc:
         doc = {k: v for k, v in doc.items() if k != "_id"}
     return doc
+
+
+# ---------------- Stop / cancellation registry ----------------
+# project_id -> {"chat": bool, "review": bool}  — True means "stop requested"
+STOP_FLAGS: dict = {}
+
+
+def _stop_flags(pid: str):
+    if pid not in STOP_FLAGS:
+        STOP_FLAGS[pid] = {"chat": False, "review": False}
+    return STOP_FLAGS[pid]
+
+
+def is_stopped(pid: str, kind: str) -> bool:
+    return _stop_flags(pid).get(kind, False)
+
+
+def clear_stop(pid: str, kind: str):
+    _stop_flags(pid)[kind] = False
+
+
+def request_stop(pid: str, kind: str):
+    _stop_flags(pid)[kind] = True
 
 
 # ---------------- LLM ----------------
@@ -391,6 +415,7 @@ async def get_project(pid: str):
 async def delete_project(pid: str):
     await db.projects.delete_one({"id": pid})
     await db.messages.delete_many({"project_id": pid})
+    STOP_FLAGS.pop(pid, None)
     return {"ok": True}
 
 
@@ -400,11 +425,23 @@ async def get_messages(pid: str):
     return [clean(d) for d in docs]
 
 
+@api_router.post("/projects/{pid}/stop")
+async def stop_project_work(pid: str, kind: str = "both"):
+    """kind: 'chat' | 'review' | 'both'"""
+    if kind in ("chat", "both"):
+        request_stop(pid, "chat")
+    if kind in ("review", "both"):
+        request_stop(pid, "review")
+    return {"ok": True, "stopped": kind}
+
+
 @api_router.post("/projects/{pid}/chat")
 async def project_chat(pid: str, body: ChatIn, background_tasks: BackgroundTasks):
     project = await db.projects.find_one({"id": pid})
     if not project:
         raise HTTPException(404, "Proiect inexistent")
+
+    clear_stop(pid, "chat")
 
     history = await db.messages.find({"project_id": pid}).sort("created_at", 1).to_list(1000)
     recent = history[-12:]
@@ -418,6 +455,12 @@ async def project_chat(pid: str, body: ChatIn, background_tasks: BackgroundTasks
     )
 
     reply = await llm_generate(BUILDER_SYSTEM, prompt, f"proj-{pid}", body.model)
+
+    if is_stopped(pid, "chat"):
+        # User cancelled while Aria was generating — discard the result, don't save it.
+        clear_stop(pid, "chat")
+        return {"reply": None, "files": [], "all_files": project.get("files", []),
+                "message": None, "auto_review_job_id": None, "stopped": True}
 
     ts = now_iso()
     user_msg = {"id": str(uuid.uuid4()), "project_id": pid, "role": "user",
@@ -434,14 +477,13 @@ async def project_chat(pid: str, body: ChatIn, background_tasks: BackgroundTasks
 
     auto_job_id = None
     if new_files:
-        # Auto-trigger the 8-agent review loop whenever new code was generated,
-        # using the SAME model the user picked for this chat message.
+        clear_stop(pid, "review")
         auto_job_id = str(uuid.uuid4())
         REVIEW_JOBS[auto_job_id] = _new_review_job(auto_job_id, pid)
         background_tasks.add_task(_run_review, auto_job_id, pid, body.model)
 
     return {"reply": reply, "files": new_files, "all_files": merged,
-            "message": clean(ai_msg), "auto_review_job_id": auto_job_id}
+            "message": clean(ai_msg), "auto_review_job_id": auto_job_id, "stopped": False}
 
 
 REVIEW_JOBS = {}
@@ -453,8 +495,8 @@ def _new_review_job(job_id, pid):
         "project_id": pid,
         "agents": {a["key"]: {"label": a["label"], "clean_streak": 0, "done": False} for a in AGENT_DEFS},
         "passes": [],           # log of every individual agent pass
-        "phase": "main",        # "main" | "final" | "complete"
-        "final_round": 0,       # 0, 1 (2x), 2 (2x), 3 (1x) within the 2-2-1 sequence
+        "phase": "main",        # "main" | "final" | "complete" | "stopped"
+        "final_round": 0,
         "files": [],
         "done": False,
         "error": None,
@@ -489,7 +531,6 @@ async def _run_single_agent_pass(pid, model, job, agent_def, current_files, pass
     })
     job["total_passes"] = len(job["passes"])
 
-    # persist progress after every single agent pass
     return len(issues) > 0
 
 
@@ -508,12 +549,19 @@ async def _run_review(job_id, pid, model=None):
         max_main_rounds = 30  # safety cap on the adaptive main phase
 
         # ---------------- MAIN PHASE ----------------
-        # Each of the 8 agents runs in order, repeatedly, until it individually
-        # reaches 2 consecutive clean passes. Any fix is immediately visible to
-        # the next agent in the same round.
         for round_num in range(max_main_rounds):
+            if is_stopped(pid, "review"):
+                job["phase"] = "stopped"
+                job["done"] = True
+                clear_stop(pid, "review")
+                return
             any_agent_still_active = False
             for agent_def in AGENT_DEFS:
+                if is_stopped(pid, "review"):
+                    job["phase"] = "stopped"
+                    job["done"] = True
+                    clear_stop(pid, "review")
+                    return
                 astate = job["agents"][agent_def["key"]]
                 if astate["done"]:
                     continue
@@ -535,16 +583,29 @@ async def _run_review(job_id, pid, model=None):
         job["phase"] = "final"
 
         # ---------------- FINAL 2-2-1 CONFIRMATION SEQUENCE ----------------
-        # If ANY agent finds an issue anywhere in this sequence, the fix is
-        # applied and the ENTIRE 2-2-1 sequence restarts from the beginning.
         final_pattern = [2, 2, 1]
-        max_final_restarts = 15  # safety cap
+        max_final_restarts = 15
         restarts = 0
         while restarts < max_final_restarts:
+            if is_stopped(pid, "review"):
+                job["phase"] = "stopped"
+                job["done"] = True
+                clear_stop(pid, "review")
+                return
             sequence_clean = True
             for stage_index, repeats in enumerate(final_pattern):
                 for rep in range(repeats):
+                    if is_stopped(pid, "review"):
+                        job["phase"] = "stopped"
+                        job["done"] = True
+                        clear_stop(pid, "review")
+                        return
                     for agent_def in AGENT_DEFS:
+                        if is_stopped(pid, "review"):
+                            job["phase"] = "stopped"
+                            job["done"] = True
+                            clear_stop(pid, "review")
+                            return
                         found_issue = await _run_single_agent_pass(
                             pid, model, job, agent_def, current,
                             f"Final confirmation stage {stage_index + 1}/3 "
@@ -574,6 +635,7 @@ async def start_review(pid: str, body: ReviewIn, background_tasks: BackgroundTas
         raise HTTPException(404, "Proiect inexistent")
     if not project.get("files"):
         raise HTTPException(400, "Nu exista cod de verificat. Genereaza intai o aplicatie in chat.")
+    clear_stop(pid, "review")
     job_id = str(uuid.uuid4())
     REVIEW_JOBS[job_id] = _new_review_job(job_id, pid)
     background_tasks.add_task(_run_review, job_id, pid, body.model)
