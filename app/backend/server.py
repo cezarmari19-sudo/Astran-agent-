@@ -51,7 +51,6 @@ def clean(doc):
 
 
 # ---------------- Stop / cancellation registry ----------------
-# project_id -> {"chat": bool, "review": bool}  — True means "stop requested"
 STOP_FLAGS: dict = {}
 
 
@@ -145,6 +144,65 @@ BUILDER_SYSTEM = (
     "Always output complete files (never omit code with '...'). Keep answers focused. "
     "For questions that are not code, answer helpfully and concisely like a great engineer."
 )
+
+
+# ---------------- Agent #9: request clarifier ----------------
+CLARIFIER_SYSTEM = (
+    "You are a requirements clarification agent for an AI app-builder. A user just sent a request that "
+    "will be turned into a real, complete application. Your ONLY job here is to decide: is this request "
+    "detailed enough to start building, or is it genuinely too vague/generic to build something specific "
+    "and good from it?\n\n"
+    "Examples of VAGUE requests that need clarification: 'make me an app', 'build me a game like Among "
+    "Us', 'create a social media app', 'make something for tracking stuff'.\n"
+    "Examples of CLEAR requests that do NOT need clarification: 'change the button color to red', 'add a "
+    "dark mode toggle in settings', 'fix the login screen', or any request detailed enough that a senior "
+    "engineer could start building immediately without guessing major decisions.\n\n"
+    "If the request is CLEAR, respond with STRICT JSON only:\n"
+    '{"needs_clarification": false, "brief": "<the original request, optionally lightly cleaned up>"}\n\n'
+    "If the request is VAGUE, respond with STRICT JSON only:\n"
+    '{"needs_clarification": true, "questions": [{"question": "...", "options": ["...", "...", "..."]}], '
+    '"note": "<one short friendly sentence to show the user>"}\n'
+    "Ask at most 3 questions, each with 2-4 short concrete options (the user may also answer freely "
+    "instead of picking an option, so options are just suggestions, not the only valid answers). Focus "
+    "questions on things that materially change what gets built (genre/purpose, key features, visual "
+    "style, target platform feel) — not trivial details.\n\n"
+    "If you are given a CONVERSATION of previous clarification questions and answers plus a new user "
+    "reply, decide whether you now have enough to build. Prefer moving forward unless it is truly still "
+    "unclear. When you have enough, respond with needs_clarification=false and a rich 'brief' that "
+    "combines everything learned into clear, detailed instructions for the engineer who will write the "
+    "code."
+)
+
+
+def extract_json_generic(text):
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n", "", text)
+        text = text.rsplit("```", 1)[0]
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1:
+        return None
+    try:
+        return json.loads(text[start:end + 1])
+    except Exception:
+        return None
+
+
+async def run_clarifier(pid: str, latest_history: list, model: str = None):
+    """Decide whether to ask clarifying questions or produce a build-ready brief.
+    latest_history: list of {role, content, msg_type} dicts, most recent last."""
+    transcript = ""
+    for m in latest_history:
+        role = "User" if m["role"] == "user" else "Clarifier"
+        transcript += f"{role}: {m['content']}\n\n"
+    prompt = f"Conversation so far:\n\n{transcript}\nDecide now."
+    raw = await llm_generate(CLARIFIER_SYSTEM, prompt, f"clarify-{pid}", model)
+    data = extract_json_generic(raw)
+    if not data:
+        # Fail open: if the clarifier itself breaks, don't block building.
+        return {"needs_clarification": False, "brief": latest_history[-1]["content"]}
+    return data
 
 
 # ---------------- 8 specialized review agents ----------------
@@ -444,6 +502,53 @@ async def project_chat(pid: str, body: ChatIn, background_tasks: BackgroundTasks
     clear_stop(pid, "chat")
 
     history = await db.messages.find({"project_id": pid}).sort("created_at", 1).to_list(1000)
+
+    # Detect whether we're mid clarification: last message is a clarifier question
+    # awaiting the user's answer.
+    in_clarification = bool(history) and history[-1].get("msg_type") == "clarify"
+
+    if in_clarification:
+        # Gather the whole clarification sub-thread (from the last real "user" build
+        # request onward) plus this new reply, and ask the clarifier again.
+        clar_thread = []
+        for m in reversed(history):
+            clar_thread.insert(0, m)
+            if m["role"] == "user" and m.get("msg_type") != "clarify_answer":
+                break
+        clar_thread.append({"role": "user", "content": body.message, "msg_type": "clarify_answer"})
+    else:
+        clar_thread = [{"role": "user", "content": body.message}]
+
+    ts = now_iso()
+    user_msg = {"id": str(uuid.uuid4()), "project_id": pid, "role": "user",
+                "content": body.message, "created_at": ts,
+                "msg_type": "clarify_answer" if in_clarification else "normal"}
+    await db.messages.insert_one(dict(user_msg))
+
+    decision = await run_clarifier(pid, clar_thread, body.model)
+
+    if is_stopped(pid, "chat"):
+        clear_stop(pid, "chat")
+        return {"reply": None, "files": [], "all_files": project.get("files", []),
+                "message": None, "auto_review_job_id": None, "stopped": True}
+
+    if decision.get("needs_clarification"):
+        clar_msg = {
+            "id": str(uuid.uuid4()), "project_id": pid, "role": "assistant",
+            "content": decision.get("note", "Am nevoie de câteva detalii înainte să încep."),
+            "created_at": now_iso(),
+            "msg_type": "clarify",
+            "questions": decision.get("questions", []),
+        }
+        await db.messages.insert_one(dict(clar_msg))
+        return {
+            "reply": clar_msg["content"], "files": [], "all_files": project.get("files", []),
+            "message": clean(clar_msg), "auto_review_job_id": None, "stopped": False,
+            "needs_clarification": True,
+        }
+
+    brief = decision.get("brief") or body.message
+
     recent = history[-12:]
     transcript = ""
     for m in recent:
@@ -451,23 +556,19 @@ async def project_chat(pid: str, body: ChatIn, background_tasks: BackgroundTasks
         transcript += f"{role}: {m['content']}\n\n"
     prompt = (
         f"Project: {project['name']}\nDescription: {project.get('description','')}\n\n"
-        f"Conversation so far:\n{transcript}\nUser: {body.message}\n\nAria:"
+        f"Conversation so far:\n{transcript}\nUser (clarified brief): {brief}\n\nAria:"
     )
 
     reply = await llm_generate(BUILDER_SYSTEM, prompt, f"proj-{pid}", body.model)
 
     if is_stopped(pid, "chat"):
-        # User cancelled while Aria was generating — discard the result, don't save it.
         clear_stop(pid, "chat")
         return {"reply": None, "files": [], "all_files": project.get("files", []),
                 "message": None, "auto_review_job_id": None, "stopped": True}
 
-    ts = now_iso()
-    user_msg = {"id": str(uuid.uuid4()), "project_id": pid, "role": "user",
-                "content": body.message, "created_at": ts}
     ai_msg = {"id": str(uuid.uuid4()), "project_id": pid, "role": "assistant",
-              "content": reply, "created_at": now_iso()}
-    await db.messages.insert_many([dict(user_msg), dict(ai_msg)])
+              "content": reply, "created_at": now_iso(), "msg_type": "normal"}
+    await db.messages.insert_one(dict(ai_msg))
 
     new_files = parse_files(reply)
     merged = merge_files(project.get("files", []), new_files) if new_files else project.get("files", [])
@@ -483,7 +584,8 @@ async def project_chat(pid: str, body: ChatIn, background_tasks: BackgroundTasks
         background_tasks.add_task(_run_review, auto_job_id, pid, body.model)
 
     return {"reply": reply, "files": new_files, "all_files": merged,
-            "message": clean(ai_msg), "auto_review_job_id": auto_job_id, "stopped": False}
+            "message": clean(ai_msg), "auto_review_job_id": auto_job_id, "stopped": False,
+            "needs_clarification": False}
 
 
 REVIEW_JOBS = {}
@@ -494,8 +596,8 @@ def _new_review_job(job_id, pid):
         "job_id": job_id,
         "project_id": pid,
         "agents": {a["key"]: {"label": a["label"], "clean_streak": 0, "done": False} for a in AGENT_DEFS},
-        "passes": [],           # log of every individual agent pass
-        "phase": "main",        # "main" | "final" | "complete" | "stopped"
+        "passes": [],
+        "phase": "main",
         "final_round": 0,
         "files": [],
         "done": False,
@@ -505,8 +607,6 @@ def _new_review_job(job_id, pid):
 
 
 async def _run_single_agent_pass(pid, model, job, agent_def, current_files, pass_label):
-    """Run one pass of one agent against current_files (dict path->content).
-    Mutates current_files in place with any fixes. Returns True if issues were found."""
     blob = "\n\n".join([f"### FILE: {p}\n```\n{c}\n```" for p, c in current_files.items()])
     prompt = f"{pass_label} — Current project files:\n\n{blob}"
     raw = await llm_generate(agent_def["system"], prompt, f"review-{pid}-{agent_def['key']}", model)
@@ -546,9 +646,8 @@ async def _run_review(job_id, pid, model=None):
     try:
         project = await db.projects.find_one({"id": pid})
         current = {f["path"]: f["content"] for f in project.get("files", [])}
-        max_main_rounds = 30  # safety cap on the adaptive main phase
+        max_main_rounds = 30
 
-        # ---------------- MAIN PHASE ----------------
         for round_num in range(max_main_rounds):
             if is_stopped(pid, "review"):
                 job["phase"] = "stopped"
@@ -582,7 +681,6 @@ async def _run_review(job_id, pid, model=None):
 
         job["phase"] = "final"
 
-        # ---------------- FINAL 2-2-1 CONFIRMATION SEQUENCE ----------------
         final_pattern = [2, 2, 1]
         max_final_restarts = 15
         restarts = 0
