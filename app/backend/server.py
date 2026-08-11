@@ -17,7 +17,9 @@ from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime, timezone
 
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+import google.generativeai as genai
+import anthropic
+import openai
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -27,7 +29,6 @@ client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
 ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY')
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
 GEMINI_MODEL = "gemini-3.5-flash"
@@ -72,49 +73,74 @@ def request_stop(pid: str, kind: str):
     _stop_flags(pid)[kind] = True
 
 
-# ---------------- LLM ----------------
-async def _call(chat, prompt):
-    if hasattr(chat, "send_message"):
-        return await chat.send_message(UserMessage(text=prompt))
-    from emergentintegrations.llm.chat import TextDelta, StreamDone
-    out = []
-    async for ev in chat.stream_message(UserMessage(text=prompt)):
-        if isinstance(ev, TextDelta):
-            out.append(ev.content)
-        elif isinstance(ev, StreamDone):
-            break
-    return "".join(out)
+# ---------------- LLM: direct calls to official SDKs, one key per provider ----------------
+def _provider_for_model(model: str) -> str:
+    if model.startswith("gemini"):
+        return "gemini"
+    if model.startswith("claude"):
+        return "anthropic"
+    return "openai"
+
+
+async def _call_gemini(model: str, system_message: str, prompt: str) -> str:
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY nu este configurata")
+    genai.configure(api_key=GEMINI_API_KEY)
+    gmodel = genai.GenerativeModel(model_name=model, system_instruction=system_message)
+    resp = await asyncio.to_thread(gmodel.generate_content, prompt)
+    return resp.text or ""
+
+
+async def _call_anthropic(model: str, system_message: str, prompt: str) -> str:
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError("ANTHROPIC_API_KEY nu este configurata")
+    aclient = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    resp = await asyncio.to_thread(
+        aclient.messages.create,
+        model=model,
+        max_tokens=8000,
+        system=system_message,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    parts = [block.text for block in resp.content if hasattr(block, "text")]
+    return "".join(parts)
+
+
+async def _call_openai(model: str, system_message: str, prompt: str) -> str:
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY nu este configurata")
+    oclient = openai.OpenAI(api_key=OPENAI_API_KEY)
+    resp = await asyncio.to_thread(
+        oclient.chat.completions.create,
+        model=model,
+        messages=[
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": prompt},
+        ],
+    )
+    return resp.choices[0].message.content or ""
 
 
 async def llm_generate(system_message, prompt, session_id, model=None):
     model = model or GEMINI_MODEL
-    if model.startswith("gemini"):
-        provider = "gemini"
-    elif model.startswith("claude"):
-        provider = "anthropic"
-    else:
-        provider = "openai"
+    provider = _provider_for_model(model)
 
-    attempts = []
-    key_map = {"gemini": GEMINI_API_KEY, "anthropic": ANTHROPIC_API_KEY, "openai": OPENAI_API_KEY}
-    own = key_map.get(provider)
-    if own:
-        attempts.append(own)
-    if EMERGENT_LLM_KEY:
-        attempts.append(EMERGENT_LLM_KEY)
-
-    last_err = None
-    for key in attempts:
-        try:
-            chat = LlmChat(api_key=key, session_id=session_id,
-                           system_message=system_message).with_model(provider, model)
-            resp = await _call(chat, prompt)
-            if resp:
-                return resp
-        except Exception as e:
-            last_err = e
-            logger.error(f"LLM attempt failed ({model}): {e}")
-    raise HTTPException(status_code=502, detail=f"AI indisponibil: {last_err}")
+    try:
+        if provider == "gemini":
+            resp = await _call_gemini(model, system_message, prompt)
+        elif provider == "anthropic":
+            resp = await _call_anthropic(model, system_message, prompt)
+        else:
+            resp = await _call_openai(model, system_message, prompt)
+        if resp:
+            return resp
+        raise RuntimeError("Raspuns gol de la model")
+    except Exception as e:
+        logger.error(f"LLM call failed ({provider}/{model}): {e}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"AI indisponibil ({provider}): {e}. Verifica cheia API pentru acest provider in Setari."
+        )
 
 
 AVAILABLE_MODELS = [
@@ -190,8 +216,6 @@ def extract_json_generic(text):
 
 
 async def run_clarifier(pid: str, latest_history: list, model: str = None):
-    """Decide whether to ask clarifying questions or produce a build-ready brief.
-    latest_history: list of {role, content, msg_type} dicts, most recent last."""
     transcript = ""
     for m in latest_history:
         role = "User" if m["role"] == "user" else "Clarifier"
@@ -200,7 +224,6 @@ async def run_clarifier(pid: str, latest_history: list, model: str = None):
     raw = await llm_generate(CLARIFIER_SYSTEM, prompt, f"clarify-{pid}", model)
     data = extract_json_generic(raw)
     if not data:
-        # Fail open: if the clarifier itself breaks, don't block building.
         return {"needs_clarification": False, "brief": latest_history[-1]["content"]}
     return data
 
@@ -423,7 +446,7 @@ async def root():
 
 @api_router.get("/health")
 async def health():
-    return {"status": "ok", "ai_key_configured": bool(GEMINI_API_KEY or EMERGENT_LLM_KEY)}
+    return {"status": "ok", "ai_key_configured": bool(GEMINI_API_KEY or ANTHROPIC_API_KEY or OPENAI_API_KEY)}
 
 
 @api_router.get("/models")
@@ -436,7 +459,6 @@ async def list_models():
             "anthropic": bool(ANTHROPIC_API_KEY),
             "openai": bool(OPENAI_API_KEY),
         },
-        "emergent_fallback": bool(EMERGENT_LLM_KEY),
     }
 
 
@@ -503,13 +525,9 @@ async def project_chat(pid: str, body: ChatIn, background_tasks: BackgroundTasks
 
     history = await db.messages.find({"project_id": pid}).sort("created_at", 1).to_list(1000)
 
-    # Detect whether we're mid clarification: last message is a clarifier question
-    # awaiting the user's answer.
     in_clarification = bool(history) and history[-1].get("msg_type") == "clarify"
 
     if in_clarification:
-        # Gather the whole clarification sub-thread (from the last real "user" build
-        # request onward) plus this new reply, and ask the clarifier again.
         clar_thread = []
         for m in reversed(history):
             clar_thread.insert(0, m)
