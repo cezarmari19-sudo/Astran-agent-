@@ -28,9 +28,27 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY')
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
+
+def _parse_key_list(env_value: str) -> list:
+    if not env_value:
+        return []
+    return [k.strip() for k in env_value.split(",") if k.strip()]
+
+
+# Support both a single key (GEMINI_API_KEY) and a comma-separated list
+# (GEMINI_API_KEYS) for fallback rotation across multiple free-tier keys.
+GEMINI_API_KEYS = _parse_key_list(os.environ.get('GEMINI_API_KEYS', ''))
+if not GEMINI_API_KEYS and os.environ.get('GEMINI_API_KEY'):
+    GEMINI_API_KEYS = [os.environ['GEMINI_API_KEY']]
+
+ANTHROPIC_API_KEYS = _parse_key_list(os.environ.get('ANTHROPIC_API_KEYS', ''))
+if not ANTHROPIC_API_KEYS and os.environ.get('ANTHROPIC_API_KEY'):
+    ANTHROPIC_API_KEYS = [os.environ['ANTHROPIC_API_KEY']]
+
+OPENAI_API_KEYS = _parse_key_list(os.environ.get('OPENAI_API_KEYS', ''))
+if not OPENAI_API_KEYS and os.environ.get('OPENAI_API_KEY'):
+    OPENAI_API_KEYS = [os.environ['OPENAI_API_KEY']]
+
 GEMINI_MODEL = "gemini-3.5-flash"
 
 logging.basicConfig(level=logging.INFO,
@@ -73,7 +91,13 @@ def request_stop(pid: str, kind: str):
     _stop_flags(pid)[kind] = True
 
 
-# ---------------- LLM: direct calls to official SDKs, one key per provider ----------------
+# ---------------- LLM: direct calls to official SDKs, with per-provider key rotation ----------------
+# For each provider we keep a rotating index: on error we advance to the next
+# key. When ALL keys have failed once, we reset the index back to 0 so the
+# next brand-new request starts over (quota may have refreshed since).
+_key_cursor = {"gemini": 0, "anthropic": 0, "openai": 0}
+
+
 def _provider_for_model(model: str) -> str:
     if model.startswith("gemini"):
         return "gemini"
@@ -82,19 +106,15 @@ def _provider_for_model(model: str) -> str:
     return "openai"
 
 
-async def _call_gemini(model: str, system_message: str, prompt: str) -> str:
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY nu este configurata")
-    genai.configure(api_key=GEMINI_API_KEY)
+async def _call_gemini_with_key(api_key: str, model: str, system_message: str, prompt: str) -> str:
+    genai.configure(api_key=api_key)
     gmodel = genai.GenerativeModel(model_name=model, system_instruction=system_message)
     resp = await asyncio.to_thread(gmodel.generate_content, prompt)
     return resp.text or ""
 
 
-async def _call_anthropic(model: str, system_message: str, prompt: str) -> str:
-    if not ANTHROPIC_API_KEY:
-        raise RuntimeError("ANTHROPIC_API_KEY nu este configurata")
-    aclient = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+async def _call_anthropic_with_key(api_key: str, model: str, system_message: str, prompt: str) -> str:
+    aclient = anthropic.Anthropic(api_key=api_key)
     resp = await asyncio.to_thread(
         aclient.messages.create,
         model=model,
@@ -106,10 +126,8 @@ async def _call_anthropic(model: str, system_message: str, prompt: str) -> str:
     return "".join(parts)
 
 
-async def _call_openai(model: str, system_message: str, prompt: str) -> str:
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY nu este configurata")
-    oclient = openai.OpenAI(api_key=OPENAI_API_KEY)
+async def _call_openai_with_key(api_key: str, model: str, system_message: str, prompt: str) -> str:
+    oclient = openai.OpenAI(api_key=api_key)
     resp = await asyncio.to_thread(
         oclient.chat.completions.create,
         model=model,
@@ -121,17 +139,49 @@ async def _call_openai(model: str, system_message: str, prompt: str) -> str:
     return resp.choices[0].message.content or ""
 
 
+async def _call_with_key_rotation(provider: str, keys: list, call_fn, model: str,
+                                   system_message: str, prompt: str) -> str:
+    if not keys:
+        raise RuntimeError(f"Nicio cheie configurata pentru {provider}")
+
+    start = _key_cursor[provider] % len(keys)
+    last_err = None
+    for offset in range(len(keys)):
+        idx = (start + offset) % len(keys)
+        key = keys[idx]
+        try:
+            result = await call_fn(key, model, system_message, prompt)
+            if result:
+                _key_cursor[provider] = idx  # stay on the working key next time
+                return result
+        except Exception as e:
+            last_err = e
+            logger.warning(f"{provider} key #{idx + 1}/{len(keys)} failed: {e}")
+            continue
+
+    # All keys failed this round — reset cursor to 0 so the NEXT request
+    # starts fresh from the first key (quota may have reset by then).
+    _key_cursor[provider] = 0
+    raise RuntimeError(f"Toate cheile {provider} au esuat: {last_err}")
+
+
 async def llm_generate(system_message, prompt, session_id, model=None):
     model = model or GEMINI_MODEL
     provider = _provider_for_model(model)
 
     try:
         if provider == "gemini":
-            resp = await _call_gemini(model, system_message, prompt)
+            resp = await _call_with_key_rotation(
+                "gemini", GEMINI_API_KEYS, _call_gemini_with_key, model, system_message, prompt
+            )
         elif provider == "anthropic":
-            resp = await _call_anthropic(model, system_message, prompt)
+            resp = await _call_with_key_rotation(
+                "anthropic", ANTHROPIC_API_KEYS, _call_anthropic_with_key, model, system_message, prompt
+            )
         else:
-            resp = await _call_openai(model, system_message, prompt)
+            resp = await _call_with_key_rotation(
+                "openai", OPENAI_API_KEYS, _call_openai_with_key, model, system_message, prompt
+            )
         if resp:
             return resp
         raise RuntimeError("Raspuns gol de la model")
@@ -139,20 +189,20 @@ async def llm_generate(system_message, prompt, session_id, model=None):
         logger.error(f"LLM call failed ({provider}/{model}): {e}")
         raise HTTPException(
             status_code=502,
-            detail=f"AI indisponibil ({provider}): {e}. Verifica cheia API pentru acest provider in Setari."
+            detail=f"AI indisponibil ({provider}): {e}. Verifica cheile API pentru acest provider in Setari."
         )
 
 
 AVAILABLE_MODELS = [
-    {"id": "gemini-3.5-flash", "label": "Gemini 3.5 Flash", "hint": "Rapid • cheia ta Gemini", "provider": "gemini"},
-    {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash", "hint": "Rapid • cheia ta Gemini", "provider": "gemini"},
-    {"id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro", "hint": "Puternic • cheia ta Gemini", "provider": "gemini"},
-    {"id": "claude-sonnet-5", "label": "Claude Sonnet 5", "hint": "Cheie Anthropic", "provider": "anthropic"},
-    {"id": "claude-opus-4-8", "label": "Claude Opus 4.8", "hint": "Cheie Anthropic", "provider": "anthropic"},
-    {"id": "claude-fable-5", "label": "Claude Fable 5", "hint": "Cheie Anthropic", "provider": "anthropic"},
-    {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "hint": "Cheie Anthropic", "provider": "anthropic"},
-    {"id": "gpt-5.5", "label": "ChatGPT 5.5", "hint": "Cheie OpenAI", "provider": "openai"},
-    {"id": "gpt-5.4", "label": "ChatGPT 5.4", "hint": "Cheie OpenAI", "provider": "openai"},
+    {"id": "gemini-3.5-flash", "label": "Gemini 3.5 Flash", "hint": "Rapid • cheile tale Gemini", "provider": "gemini"},
+    {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash", "hint": "Rapid • cheile tale Gemini", "provider": "gemini"},
+    {"id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro", "hint": "Puternic • cheile tale Gemini", "provider": "gemini"},
+    {"id": "claude-sonnet-5", "label": "Claude Sonnet 5", "hint": "Cheile tale Anthropic", "provider": "anthropic"},
+    {"id": "claude-opus-4-8", "label": "Claude Opus 4.8", "hint": "Cheile tale Anthropic", "provider": "anthropic"},
+    {"id": "claude-fable-5", "label": "Claude Fable 5", "hint": "Cheile tale Anthropic", "provider": "anthropic"},
+    {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "hint": "Cheile tale Anthropic", "provider": "anthropic"},
+    {"id": "gpt-5.5", "label": "ChatGPT 5.5", "hint": "Cheile tale OpenAI", "provider": "openai"},
+    {"id": "gpt-5.4", "label": "ChatGPT 5.4", "hint": "Cheile tale OpenAI", "provider": "openai"},
 ]
 
 
@@ -446,7 +496,7 @@ async def root():
 
 @api_router.get("/health")
 async def health():
-    return {"status": "ok", "ai_key_configured": bool(GEMINI_API_KEY or ANTHROPIC_API_KEY or OPENAI_API_KEY)}
+    return {"status": "ok", "ai_key_configured": bool(GEMINI_API_KEYS or ANTHROPIC_API_KEYS or OPENAI_API_KEYS)}
 
 
 @api_router.get("/models")
@@ -455,9 +505,14 @@ async def list_models():
         "models": AVAILABLE_MODELS,
         "default": GEMINI_MODEL,
         "providers_available": {
-            "gemini": bool(GEMINI_API_KEY),
-            "anthropic": bool(ANTHROPIC_API_KEY),
-            "openai": bool(OPENAI_API_KEY),
+            "gemini": bool(GEMINI_API_KEYS),
+            "anthropic": bool(ANTHROPIC_API_KEYS),
+            "openai": bool(OPENAI_API_KEYS),
+        },
+        "key_counts": {
+            "gemini": len(GEMINI_API_KEYS),
+            "anthropic": len(ANTHROPIC_API_KEYS),
+            "openai": len(OPENAI_API_KEYS),
         },
     }
 
