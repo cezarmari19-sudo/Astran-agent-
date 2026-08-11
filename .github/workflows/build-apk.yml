@@ -16,7 +16,7 @@ jobs:
           node-version: "20"
 
       - name: Install dependencies
-        working-directory: frontend
+        working-directory: app/frontend
         run: yarn install --frozen-lockfile
 
       - name: Set up EAS CLI
@@ -26,5 +26,5 @@ jobs:
           token: ${{ secrets.EXPO_TOKEN }}
 
       - name: Build APK via EAS
-        working-directory: frontend
+        working-directory: app/frontend
         run: eas build --platform android --profile preview --non-interactive
