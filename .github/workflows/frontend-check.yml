@@ -3,11 +3,11 @@ name: Frontend check
 on:
   push:
     paths:
-      - "frontend/**"
+      - "app/frontend/**"
       - ".github/workflows/frontend-check.yml"
   pull_request:
     paths:
-      - "frontend/**"
+      - "app/frontend/**"
 
 jobs:
   check:
@@ -22,13 +22,13 @@ jobs:
           node-version: "20"
 
       - name: Install dependencies
-        working-directory: frontend
+        working-directory: app/frontend
         run: yarn install --frozen-lockfile
 
       - name: TypeScript type check
-        working-directory: frontend
+        working-directory: app/frontend
         run: yarn tsc --noEmit
 
       - name: Expo doctor (config sanity check)
-        working-directory: frontend
+        working-directory: app/frontend
         run: npx expo-doctor || true
