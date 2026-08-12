@@ -11,6 +11,7 @@ import logging
 import operator
 import uuid
 import asyncio
+import time
 import requests
 from pathlib import Path
 from pydantic import BaseModel
@@ -35,8 +36,6 @@ def _parse_key_list(env_value: str) -> list:
     return [k.strip() for k in env_value.split(",") if k.strip()]
 
 
-# Support both a single key (GEMINI_API_KEY) and a comma-separated list
-# (GEMINI_API_KEYS) for fallback rotation across multiple free-tier keys.
 GEMINI_API_KEYS = _parse_key_list(os.environ.get('GEMINI_API_KEYS', ''))
 if not GEMINI_API_KEYS and os.environ.get('GEMINI_API_KEY'):
     GEMINI_API_KEYS = [os.environ['GEMINI_API_KEY']]
@@ -92,10 +91,21 @@ def request_stop(pid: str, kind: str):
 
 
 # ---------------- LLM: direct calls to official SDKs, with per-provider key rotation ----------------
-# For each provider we keep a rotating index: on error we advance to the next
-# key. When ALL keys have failed once, we reset the index back to 0 so the
-# next brand-new request starts over (quota may have refreshed since).
+# Per-provider "all keys exhausted" recovery state. When every key for a
+# provider fails in the same request, we mark the provider as exhausted and
+# start (or reuse) a single background recovery task shared by everyone
+# waiting — instead of each request hammering the APIs independently.
 _key_cursor = {"gemini": 0, "anthropic": 0, "openai": 0}
+
+RETRY_BETWEEN_KEYS_SECONDS = 10          # gap between trying key N and key N+1
+RECOVERY_CHECK_INTERVAL_SECONDS = 10 * 60  # re-sweep all keys every 10 minutes
+RECOVERY_MAX_SECONDS = 30 * 60 * 60        # give up after 30 hours total
+
+_provider_state = {
+    "gemini": {"exhausted": False, "recovery_task": None, "recovered_event": None, "give_up": False},
+    "anthropic": {"exhausted": False, "recovery_task": None, "recovered_event": None, "give_up": False},
+    "openai": {"exhausted": False, "recovery_task": None, "recovered_event": None, "give_up": False},
+}
 
 
 def _provider_for_model(model: str) -> str:
@@ -139,10 +149,89 @@ async def _call_openai_with_key(api_key: str, model: str, system_message: str, p
     return resp.choices[0].message.content or ""
 
 
-async def _call_with_key_rotation(provider: str, keys: list, call_fn, model: str,
-                                   system_message: str, prompt: str) -> str:
+_CALL_FN = {
+    "gemini": _call_gemini_with_key,
+    "anthropic": _call_anthropic_with_key,
+    "openai": _call_openai_with_key,
+}
+_KEYS_BY_PROVIDER = {
+    "gemini": GEMINI_API_KEYS,
+    "anthropic": ANTHROPIC_API_KEYS,
+    "openai": OPENAI_API_KEYS,
+}
+
+
+async def _sweep_all_keys_once(provider: str, model: str) -> Optional[str]:
+    """Try every key for this provider once (10s apart). Return a working key, or None."""
+    keys = _KEYS_BY_PROVIDER[provider]
+    call_fn = _CALL_FN[provider]
+    for idx, key in enumerate(keys):
+        try:
+            # A cheap probe call: reuse the real call with a trivial prompt so we
+            # don't waste a real user prompt on a probe. Use the target model so
+            # the probe reflects real availability for that model.
+            await call_fn(key, model, "ping", "ping")
+            return key
+        except Exception as e:
+            logger.warning(f"{provider} recovery probe: key #{idx + 1}/{len(keys)} still failing: {e}")
+        if idx < len(keys) - 1:
+            await asyncio.sleep(RETRY_BETWEEN_KEYS_SECONDS)
+    return None
+
+
+async def _recovery_loop(provider: str, model: str):
+    state = _provider_state[provider]
+    started = time.monotonic()
+    try:
+        while True:
+            if time.monotonic() - started >= RECOVERY_MAX_SECONDS:
+                state["give_up"] = True
+                break
+            working_key = await _sweep_all_keys_once(provider, model)
+            if working_key:
+                keys = _KEYS_BY_PROVIDER[provider]
+                _key_cursor[provider] = keys.index(working_key)
+                state["exhausted"] = False
+                break
+            await asyncio.sleep(RECOVERY_CHECK_INTERVAL_SECONDS)
+    finally:
+        if state["recovered_event"]:
+            state["recovered_event"].set()
+        state["recovery_task"] = None
+
+
+async def _wait_for_recovery(provider: str, model: str):
+    """Block the caller until the shared recovery task finds a key, or gives up."""
+    state = _provider_state[provider]
+    if state["recovery_task"] is None:
+        state["give_up"] = False
+        state["recovered_event"] = asyncio.Event()
+        state["recovery_task"] = asyncio.create_task(_recovery_loop(provider, model))
+    else:
+        if state["recovered_event"] is None:
+            state["recovered_event"] = asyncio.Event()
+
+    await state["recovered_event"].wait()
+
+    if state["give_up"]:
+        raise RuntimeError(
+            f"Cheile {provider} par blocate de furnizor (nu doar cota depasita) — "
+            f"nicio cheie nu a functionat in {RECOVERY_MAX_SECONDS // 3600} de ore."
+        )
+
+
+async def _call_with_key_rotation(provider: str, model: str, system_message: str, prompt: str) -> str:
+    keys = _KEYS_BY_PROVIDER[provider]
+    call_fn = _CALL_FN[provider]
     if not keys:
         raise RuntimeError(f"Nicio cheie configurata pentru {provider}")
+
+    state = _provider_state[provider]
+
+    # If a shared recovery sweep is already in progress, don't hammer keys —
+    # just wait for it (this covers "multiple users waiting at once").
+    if state["exhausted"] or state["recovery_task"] is not None:
+        await _wait_for_recovery(provider, model)
 
     start = _key_cursor[provider] % len(keys)
     last_err = None
@@ -152,17 +241,22 @@ async def _call_with_key_rotation(provider: str, keys: list, call_fn, model: str
         try:
             result = await call_fn(key, model, system_message, prompt)
             if result:
-                _key_cursor[provider] = idx  # stay on the working key next time
+                _key_cursor[provider] = idx
                 return result
         except Exception as e:
             last_err = e
             logger.warning(f"{provider} key #{idx + 1}/{len(keys)} failed: {e}")
+            if offset < len(keys) - 1:
+                await asyncio.sleep(RETRY_BETWEEN_KEYS_SECONDS)
             continue
 
-    # All keys failed this round — reset cursor to 0 so the NEXT request
-    # starts fresh from the first key (quota may have reset by then).
-    _key_cursor[provider] = 0
-    raise RuntimeError(f"Toate cheile {provider} au esuat: {last_err}")
+    # Every key failed in this pass — hand off to the shared recovery loop and
+    # wait with everyone else instead of surfacing an error immediately.
+    state["exhausted"] = True
+    await _wait_for_recovery(provider, model)
+    # Recovery found a key — retry the real call once with it.
+    working_idx = _key_cursor[provider]
+    return await call_fn(keys[working_idx], model, system_message, prompt)
 
 
 async def llm_generate(system_message, prompt, session_id, model=None):
@@ -170,18 +264,7 @@ async def llm_generate(system_message, prompt, session_id, model=None):
     provider = _provider_for_model(model)
 
     try:
-        if provider == "gemini":
-            resp = await _call_with_key_rotation(
-                "gemini", GEMINI_API_KEYS, _call_gemini_with_key, model, system_message, prompt
-            )
-        elif provider == "anthropic":
-            resp = await _call_with_key_rotation(
-                "anthropic", ANTHROPIC_API_KEYS, _call_anthropic_with_key, model, system_message, prompt
-            )
-        else:
-            resp = await _call_with_key_rotation(
-                "openai", OPENAI_API_KEYS, _call_openai_with_key, model, system_message, prompt
-            )
+        resp = await _call_with_key_rotation(provider, model, system_message, prompt)
         if resp:
             return resp
         raise RuntimeError("Raspuns gol de la model")
@@ -189,7 +272,7 @@ async def llm_generate(system_message, prompt, session_id, model=None):
         logger.error(f"LLM call failed ({provider}/{model}): {e}")
         raise HTTPException(
             status_code=502,
-            detail=f"AI indisponibil ({provider}): {e}. Verifica cheile API pentru acest provider in Setari."
+            detail=f"AI indisponibil ({provider}): {e}"
         )
 
 
