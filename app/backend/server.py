@@ -91,14 +91,10 @@ def request_stop(pid: str, kind: str):
 
 
 # ---------------- LLM: direct calls to official SDKs, with per-provider key rotation ----------------
-# Per-provider "all keys exhausted" recovery state. When every key for a
-# provider fails in the same request, we mark the provider as exhausted and
-# start (or reuse) a single background recovery task shared by everyone
-# waiting — instead of each request hammering the APIs independently.
 _key_cursor = {"gemini": 0, "anthropic": 0, "openai": 0}
 
-RETRY_BETWEEN_KEYS_SECONDS = 10          # gap between trying key N and key N+1
-RECOVERY_CHECK_INTERVAL_SECONDS = 10 * 60  # re-sweep all keys every 10 minutes
+RETRY_BETWEEN_KEYS_SECONDS = 10          # gap between trying key N and key N+1 in NORMAL use
+RECOVERY_CHECK_INTERVAL_SECONDS = 10 * 60  # re-sweep ALL keys every 10 minutes when exhausted
 RECOVERY_MAX_SECONDS = 30 * 60 * 60        # give up after 30 hours total
 
 _provider_state = {
@@ -162,20 +158,17 @@ _KEYS_BY_PROVIDER = {
 
 
 async def _sweep_all_keys_once(provider: str, model: str) -> Optional[str]:
-    """Try every key for this provider once (10s apart). Return a working key, or None."""
+    """Fire a quick probe at EVERY key for this provider, back to back (no
+    artificial delay between them), and return the first one that works —
+    or None if all fail. This runs once per recovery cycle (every 10 min)."""
     keys = _KEYS_BY_PROVIDER[provider]
     call_fn = _CALL_FN[provider]
     for idx, key in enumerate(keys):
         try:
-            # A cheap probe call: reuse the real call with a trivial prompt so we
-            # don't waste a real user prompt on a probe. Use the target model so
-            # the probe reflects real availability for that model.
             await call_fn(key, model, "ping", "ping")
             return key
         except Exception as e:
-            logger.warning(f"{provider} recovery probe: key #{idx + 1}/{len(keys)} still failing: {e}")
-        if idx < len(keys) - 1:
-            await asyncio.sleep(RETRY_BETWEEN_KEYS_SECONDS)
+            logger.warning(f"{provider} recovery sweep: key #{idx + 1}/{len(keys)} still failing: {e}")
     return None
 
 
@@ -184,14 +177,14 @@ async def _recovery_loop(provider: str, model: str):
     started = time.monotonic()
     try:
         while True:
-            if time.monotonic() - started >= RECOVERY_MAX_SECONDS:
-                state["give_up"] = True
-                break
             working_key = await _sweep_all_keys_once(provider, model)
             if working_key:
                 keys = _KEYS_BY_PROVIDER[provider]
                 _key_cursor[provider] = keys.index(working_key)
                 state["exhausted"] = False
+                break
+            if time.monotonic() - started >= RECOVERY_MAX_SECONDS:
+                state["give_up"] = True
                 break
             await asyncio.sleep(RECOVERY_CHECK_INTERVAL_SECONDS)
     finally:
@@ -201,7 +194,8 @@ async def _recovery_loop(provider: str, model: str):
 
 
 async def _wait_for_recovery(provider: str, model: str):
-    """Block the caller until the shared recovery task finds a key, or gives up."""
+    """Block the caller until the shared recovery task finds a key, or gives up.
+    Multiple concurrent requests share the SAME recovery task/sweep."""
     state = _provider_state[provider]
     if state["recovery_task"] is None:
         state["give_up"] = False
@@ -228,8 +222,6 @@ async def _call_with_key_rotation(provider: str, model: str, system_message: str
 
     state = _provider_state[provider]
 
-    # If a shared recovery sweep is already in progress, don't hammer keys —
-    # just wait for it (this covers "multiple users waiting at once").
     if state["exhausted"] or state["recovery_task"] is not None:
         await _wait_for_recovery(provider, model)
 
@@ -250,11 +242,8 @@ async def _call_with_key_rotation(provider: str, model: str, system_message: str
                 await asyncio.sleep(RETRY_BETWEEN_KEYS_SECONDS)
             continue
 
-    # Every key failed in this pass — hand off to the shared recovery loop and
-    # wait with everyone else instead of surfacing an error immediately.
     state["exhausted"] = True
     await _wait_for_recovery(provider, model)
-    # Recovery found a key — retry the real call once with it.
     working_idx = _key_cursor[provider]
     return await call_fn(keys[working_idx], model, system_message, prompt)
 
