@@ -25,6 +25,10 @@ jobs:
           eas-version: latest
           token: ${{ secrets.EXPO_TOKEN }}
 
+      - name: Initialize EAS project (if not already configured)
+        working-directory: app/frontend
+        run: eas init --account cezarmari19-sufo --non-interactive --force
+
       - name: Build APK via EAS
         working-directory: app/frontend
         run: eas build --platform android --profile preview --non-interactive
