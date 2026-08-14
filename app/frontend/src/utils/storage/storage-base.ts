@@ -26,4 +26,8 @@ export abstract class StorageBase {
 
 // Compile-time guard: ensures the concrete Storage class in index.ts never
 // grows an extra public method without it being declared here first.
-export type AssertNoExtras<T extends never> = T;
+// Any key passed in resolves to `never`, which is exactly what index.ts
+// expects when it has no methods beyond what StorageBase already declares.
+export type AssertNoExtras<T extends string> = {
+  [K in T]: "ERROR: new method must be declared in storage-base.ts first";
+};
