@@ -29,6 +29,23 @@ jobs:
         working-directory: app/frontend
         run: eas init --account cezarmari19-sufo --non-interactive --force
 
-      - name: Build APK via EAS
+      - name: Build APK via EAS and wait for completion
         working-directory: app/frontend
-        run: eas build --platform android --profile preview --non-interactive
+        run: eas build --platform android --profile preview --non-interactive --wait --json > build-result.json
+
+      - name: Extract APK download URL
+        working-directory: app/frontend
+        run: |
+          APK_URL=$(node -e "const r = require('./build-result.json'); console.log(Array.isArray(r) ? r[0].artifacts.buildUrl : r.artifacts.buildUrl)")
+          echo "APK_URL=$APK_URL" >> $GITHUB_ENV
+
+      - name: Download APK
+        working-directory: app/frontend
+        run: curl -L -o app-release.apk "$APK_URL"
+
+      - name: Upload APK as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: app/frontend/app-release.apk
+          retention-days: 30
