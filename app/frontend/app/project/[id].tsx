@@ -191,7 +191,9 @@ export default function ProjectScreen() {
     <View style={styles.container}>
       <Header
         title={project?.name || "Proiect"}
-        subtitle={`${project?.files?.length || 0} fișiere • Gemini 3.5 Flash`}
+        subtitle={`${project?.files?.length || 0} fișiere • ${
+          models.find((m: any) => m.id === model)?.label || model
+        }`}
         onBack={() => router.back()}
         right={
           <Pressable testID="delete-chat-btn" onPress={() => setConfirmDel(true)} hitSlop={10}>
@@ -280,6 +282,7 @@ export default function ProjectScreen() {
     </View>
   );
 }
+
 function ChatTab({
   messages,
   sending,
