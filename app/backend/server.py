@@ -869,3 +869,313 @@ async def chat_job_status(job_id: str):
     if not job:
         raise HTTPException(404, "Job inexistent")
     return job
+REVIEW_JOBS = {}
+
+
+def _new_review_job(job_id, pid):
+    return {
+        "job_id": job_id,
+        "project_id": pid,
+        "agents": {a["key"]: {"label": a["label"], "clean_streak": 0, "done": False} for a in AGENT_DEFS},
+        "passes": [],
+        "phase": "main",
+        "final_round": 0,
+        "files": [],
+        "done": False,
+        "error": None,
+        "total_passes": 0,
+    }
+
+
+async def _run_single_agent_pass(pid, model, job, agent_def, current_files, pass_label):
+    blob = "\n\n".join([f"### FILE: {p}\n```\n{c}\n```" for p, c in current_files.items()])
+    prompt = f"{pass_label} — Current project files:\n\n{blob}"
+    raw = await llm_generate(agent_def["system"], prompt, f"review-{pid}-{agent_def['key']}", model)
+    data = extract_json(raw)
+    if not data:
+        data = {"issues": [{"severity": "low", "file": "-",
+                            "description": "Agentul a raspuns in format liber.",
+                            "fix": raw[:500]}], "files": [], "summary": "Format neuzual."}
+    issues = data.get("issues", [])
+    fixed = data.get("files", [])
+    for f in fixed:
+        if f.get("path"):
+            current_files[f["path"]] = f.get("content", current_files.get(f["path"], ""))
+
+    job["passes"].append({
+        "agent": agent_def["key"],
+        "agent_label": agent_def["label"],
+        "label": pass_label,
+        "issues": issues,
+        "summary": data.get("summary", ""),
+        "fixed_count": len(fixed),
+    })
+    job["total_passes"] = len(job["passes"])
+
+    return len(issues) > 0
+
+
+async def _persist(pid, job, current_files):
+    final_files = [{"path": p, "content": c} for p, c in current_files.items()]
+    await db.projects.update_one({"id": pid},
+                                 {"$set": {"files": final_files, "updated_at": now_iso()}})
+    job["files"] = final_files
+
+
+async def _run_review(job_id, pid, model=None):
+    job = REVIEW_JOBS[job_id]
+    try:
+        project = await db.projects.find_one({"id": pid})
+        current = {f["path"]: f["content"] for f in project.get("files", [])}
+        max_main_rounds = 30
+
+        for round_num in range(max_main_rounds):
+            if is_stopped(pid, "review"):
+                job["phase"] = "stopped"
+                job["done"] = True
+                clear_stop(pid, "review")
+                return
+            any_agent_still_active = False
+            for agent_def in AGENT_DEFS:
+                if is_stopped(pid, "review"):
+                    job["phase"] = "stopped"
+                    job["done"] = True
+                    clear_stop(pid, "review")
+                    return
+                astate = job["agents"][agent_def["key"]]
+                if astate["done"]:
+                    continue
+                any_agent_still_active = True
+                found_issue = await _run_single_agent_pass(
+                    pid, model, job, agent_def, current,
+                    f"Main round {round_num + 1} — {agent_def['label']}"
+                )
+                await _persist(pid, job, current)
+                if found_issue:
+                    astate["clean_streak"] = 0
+                else:
+                    astate["clean_streak"] += 1
+                    if astate["clean_streak"] >= 2:
+                        astate["done"] = True
+            if not any_agent_still_active:
+                break
+
+        job["phase"] = "final"
+
+        final_pattern = [2, 2, 1]
+        max_final_restarts = 15
+        restarts = 0
+        while restarts < max_final_restarts:
+            if is_stopped(pid, "review"):
+                job["phase"] = "stopped"
+                job["done"] = True
+                clear_stop(pid, "review")
+                return
+            sequence_clean = True
+            for stage_index, repeats in enumerate(final_pattern):
+                for rep in range(repeats):
+                    if is_stopped(pid, "review"):
+                        job["phase"] = "stopped"
+                        job["done"] = True
+                        clear_stop(pid, "review")
+                        return
+                    for agent_def in AGENT_DEFS:
+                        if is_stopped(pid, "review"):
+                            job["phase"] = "stopped"
+                            job["done"] = True
+                            clear_stop(pid, "review")
+                            return
+                        found_issue = await _run_single_agent_pass(
+                            pid, model, job, agent_def, current,
+                            f"Final confirmation stage {stage_index + 1}/3 "
+                            f"(pass {rep + 1}/{repeats}) — {agent_def['label']}"
+                        )
+                        await _persist(pid, job, current)
+                        if found_issue:
+                            sequence_clean = False
+                if not sequence_clean:
+                    break
+            if sequence_clean:
+                break
+            restarts += 1
+
+        job["phase"] = "complete"
+        job["done"] = True
+    except Exception as e:
+        logger.error(f"review job error: {e}")
+        job["error"] = str(e)
+        job["done"] = True
+
+
+@api_router.post("/projects/{pid}/review")
+async def start_review(pid: str, body: ReviewIn, background_tasks: BackgroundTasks):
+    project = await db.projects.find_one({"id": pid})
+    if not project:
+        raise HTTPException(404, "Proiect inexistent")
+    if not project.get("files"):
+        raise HTTPException(400, "Nu exista cod de verificat. Genereaza intai o aplicatie in chat.")
+    clear_stop(pid, "review")
+    job_id = str(uuid.uuid4())
+    REVIEW_JOBS[job_id] = _new_review_job(job_id, pid)
+    background_tasks.add_task(_run_review, job_id, pid, body.model)
+    return {"job_id": job_id}
+
+
+@api_router.get("/review/{job_id}")
+async def review_status(job_id: str):
+    job = REVIEW_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(404, "Job inexistent")
+    return job
+
+
+# Notes
+@api_router.post("/notes")
+async def create_note(body: NoteIn):
+    note = {"id": str(uuid.uuid4()), "title": body.title,
+            "content": body.content or "", "created_at": now_iso()}
+    await db.notes.insert_one(dict(note))
+    return clean(note)
+
+
+@api_router.get("/notes")
+async def list_notes():
+    docs = await db.notes.find().sort("created_at", -1).to_list(500)
+    return [clean(d) for d in docs]
+
+
+@api_router.delete("/notes/{nid}")
+async def delete_note(nid: str):
+    await db.notes.delete_one({"id": nid})
+    return {"ok": True}
+
+
+# Tools: calculator
+_OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+        ast.Div: operator.truediv, ast.Pow: operator.pow, ast.Mod: operator.mod,
+        ast.USub: operator.neg, ast.UAdd: operator.pos, ast.FloorDiv: operator.floordiv}
+
+
+def _eval(node):
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, (int, float)):
+            return node.value
+        raise ValueError("Doar numere")
+    if isinstance(node, ast.BinOp):
+        return _OPS[type(node.op)](_eval(node.left), _eval(node.right))
+    if isinstance(node, ast.UnaryOp):
+        return _OPS[type(node.op)](_eval(node.operand))
+    raise ValueError("Expresie invalida")
+
+
+@api_router.post("/tools/calculator")
+async def calculator(body: CalcIn):
+    try:
+        tree = ast.parse(body.expression, mode="eval")
+        result = _eval(tree.body)
+        return {"expression": body.expression, "result": result}
+    except Exception as e:
+        raise HTTPException(400, f"Expresie invalida: {e}")
+
+
+# Tools: web search via public SearXNG
+SEARX_INSTANCES = ["https://searx.be", "https://priv.au",
+                   "https://searx.tiekoetter.com", "https://search.rhscz.eu"]
+
+
+@api_router.post("/tools/websearch")
+async def websearch(body: SearchIn):
+    headers = {"User-Agent": "Mozilla/5.0 (AI-Builder)"}
+    for base in SEARX_INSTANCES:
+        try:
+            r = requests.get(f"{base}/search",
+                             params={"q": body.query, "format": "json"},
+                             headers=headers, timeout=10)
+            if r.status_code == 200 and r.headers.get("content-type", "").startswith("application/json"):
+                data = r.json()
+                results = []
+                for item in data.get("results", [])[:8]:
+                    results.append({"title": item.get("title", ""),
+                                    "url": item.get("url", ""),
+                                    "content": item.get("content", "")})
+                if results:
+                    return {"query": body.query, "engine": base, "results": results}
+        except Exception as e:
+            logger.info(f"searx {base} failed: {e}")
+            continue
+    return {"query": body.query, "engine": None, "results": [],
+            "note": "Nicio instanta SearXNG publica nu a raspuns cu JSON. Incearca din nou."}
+
+
+# GitHub
+@api_router.post("/github/repos")
+async def github_repos(body: GithubReposIn):
+    headers = {"Authorization": f"Bearer {body.token}",
+               "Accept": "application/vnd.github+json"}
+    r = requests.get("https://api.github.com/user/repos",
+                     params={"per_page": 100, "sort": "updated"},
+                     headers=headers, timeout=15)
+    if r.status_code != 200:
+        raise HTTPException(400, f"Token GitHub invalid ({r.status_code})")
+    repos = [{"full_name": x["full_name"], "private": x["private"],
+              "default_branch": x.get("default_branch", "main")} for x in r.json()]
+    user = requests.get("https://api.github.com/user", headers=headers, timeout=15)
+    login = user.json().get("login") if user.status_code == 200 else None
+    return {"login": login, "repos": repos}
+
+
+@api_router.post("/github/commit")
+async def github_commit(body: GithubCommitIn):
+    files = body.files
+    if body.project_id and not files:
+        project = await db.projects.find_one({"id": body.project_id})
+        if not project:
+            raise HTTPException(404, "Proiect inexistent")
+        files = project.get("files", [])
+    if not files:
+        raise HTTPException(400, "Niciun fisier de trimis.")
+
+    headers = {"Authorization": f"Bearer {body.token}",
+               "Accept": "application/vnd.github+json"}
+    results = []
+    for f in files:
+        path = f["path"]
+        url = f"https://api.github.com/repos/{body.repo}/contents/{path}"
+        sha = None
+        try:
+            g = requests.get(url, params={"ref": body.branch}, headers=headers, timeout=15)
+            if g.status_code == 200:
+                sha = g.json().get("sha")
+        except Exception:
+            pass
+        payload = {"message": body.message, "branch": body.branch,
+                   "content": base64.b64encode(f["content"].encode()).decode()}
+        if sha:
+            payload["sha"] = sha
+        try:
+            p = requests.put(url, headers=headers, json=payload, timeout=20)
+            ok = p.status_code in (200, 201)
+            results.append({"path": path, "ok": ok, "status": p.status_code,
+                            "error": None if ok else p.json().get("message", "")})
+        except Exception as e:
+            results.append({"path": path, "ok": False, "status": 0, "error": str(e)})
+
+    committed = sum(1 for r in results if r["ok"])
+    return {"repo": body.repo, "branch": body.branch,
+            "committed": committed, "total": len(files), "results": results}
+
+
+app.include_router(api_router)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    client.close()
