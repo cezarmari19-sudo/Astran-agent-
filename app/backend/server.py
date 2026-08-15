@@ -352,6 +352,8 @@ async def run_clarifier(pid: str, latest_history: list, model: str = None):
     if not data:
         return {"needs_clarification": False, "brief": latest_history[-1]["content"]}
     return data
+
+
 # ---------------- 8 specialized review agents ----------------
 AGENT_DEFS = [
     {
@@ -746,6 +748,13 @@ def _new_review_job(job_id, pid):
         "passes": [],
         "phase": "main",
         "final_round": 0,
+        "files": [],
+        "done": False,
+        "error": None,
+        "total_passes": 0,
+    }
+
+
 async def _run_single_agent_pass(pid, model, job, agent_def, current_files, pass_label):
     blob = "\n\n".join([f"### FILE: {p}\n```\n{c}\n```" for p, c in current_files.items()])
     prompt = f"{pass_label} — Current project files:\n\n{blob}"
