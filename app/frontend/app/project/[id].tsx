@@ -45,6 +45,8 @@ export default function ProjectScreen() {
   const [emergentFallback, setEmergentFallback] = useState(false);
   const [modelSheet, setModelSheet] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [clarifyStep, setClarifyStep] = useState(0);
+  const [clarifyAnswers, setClarifyAnswers] = useState<string[]>([]);
   const scrollRef = useRef<ScrollView>(null);
 
   const removeProject = async () => {
@@ -110,6 +112,8 @@ export default function ProjectScreen() {
       } else {
         setMessages((m) => [...m, res.message]);
         if (res.all_files) setProject((p) => (p ? { ...p, files: res.all_files } : p));
+        setClarifyStep(0);
+        setClarifyAnswers([]);
       }
     } catch (e: any) {
       show(e.message, "err");
@@ -119,8 +123,50 @@ export default function ProjectScreen() {
     }
   };
 
-  const send = () => sendText(input);
-  const pickAnswer = (text: string) => sendText(text);
+  const lastMsg = messages[messages.length - 1];
+  const clarifyQuestions: ClarifyQuestion[] =
+    lastMsg && lastMsg.msg_type === "clarify" && Array.isArray(lastMsg.questions)
+      ? lastMsg.questions
+      : [];
+  const inClarifyFlow = clarifyQuestions.length > 0 && clarifyStep < clarifyQuestions.length;
+
+  const resetClarify = () => {
+    setClarifyStep(0);
+    setClarifyAnswers([]);
+  };
+
+  const answerClarifyStep = (answerText: string) => {
+    const nextAnswers = [...clarifyAnswers, answerText];
+    const nextStep = clarifyStep + 1;
+    if (nextStep >= clarifyQuestions.length) {
+      const combined = clarifyQuestions
+        .map((q, i) => `${q.question} ${nextAnswers[i]}`)
+        .join("\n");
+      resetClarify();
+      sendText(combined);
+    } else {
+      setClarifyAnswers(nextAnswers);
+      setClarifyStep(nextStep);
+    }
+  };
+
+  const send = () => {
+    if (inClarifyFlow) {
+      if (!input.trim()) return;
+      const text = input;
+      setInput("");
+      answerClarifyStep(text);
+    } else {
+      sendText(input);
+    }
+  };
+  const pickAnswer = (text: string) => {
+    if (inClarifyFlow) {
+      answerClarifyStep(text);
+    } else {
+      sendText(text);
+    }
+  };
 
   const stopEverything = async () => {
     setStopping(true);
@@ -182,6 +228,7 @@ export default function ProjectScreen() {
           setInput={setInput}
           send={send}
           onPickAnswer={pickAnswer}
+          clarifyStep={clarifyStep}
           scrollRef={scrollRef}
           model={model}
           models={models}
@@ -233,7 +280,6 @@ export default function ProjectScreen() {
     </View>
   );
 }
-
 function ChatTab({
   messages,
   sending,
@@ -241,6 +287,7 @@ function ChatTab({
   setInput,
   send,
   onPickAnswer,
+  clarifyStep,
   scrollRef,
   model,
   models,
@@ -276,44 +323,51 @@ function ChatTab({
             </Text>
           </View>
         )}
-        {messages.map((m: Msg) => (
-          <View key={m.id}>
-            <View
-              testID={`msg-${m.role}`}
-              style={[
-                styles.bubble,
-                m.role === "user" ? styles.userBubble : styles.aiBubble,
-                m.msg_type === "clarify" && styles.clarifyBubble,
-              ]}
-            >
-              {m.role !== "user" && (
-                <View style={styles.aiTag}>
-                  <View style={styles.brandDot} />
-                  <Text style={styles.aiTagText}>
-                    {m.msg_type === "clarify" ? "Aria — câteva detalii" : "Aria"}
-                  </Text>
-                </View>
-              )}
-              <Text
+        {messages.map((m: Msg, mi: number) => {
+          const isLastMsg = mi === messages.length - 1;
+          const currentQuestion =
+            m.msg_type === "clarify" && Array.isArray(m.questions) && isLastMsg
+              ? m.questions[clarifyStep]
+              : null;
+          return (
+            <View key={m.id}>
+              <View
+                testID={`msg-${m.role}`}
                 style={[
-                  styles.bubbleText,
-                  m.role === "user" && { color: "#04140B" },
+                  styles.bubble,
+                  m.role === "user" ? styles.userBubble : styles.aiBubble,
+                  m.msg_type === "clarify" && styles.clarifyBubble,
                 ]}
               >
-                {m.content}
-              </Text>
-            </View>
+                {m.role !== "user" && (
+                  <View style={styles.aiTag}>
+                    <View style={styles.brandDot} />
+                    <Text style={styles.aiTagText}>
+                      {m.msg_type === "clarify" ? "Aria — câteva detalii" : "Aria"}
+                    </Text>
+                  </View>
+                )}
+                <Text
+                  style={[
+                    styles.bubbleText,
+                    m.role === "user" && { color: "#04140B" },
+                  ]}
+                >
+                  {m.content}
+                </Text>
+              </View>
 
-            {m.msg_type === "clarify" && Array.isArray(m.questions) && (
-              <View style={styles.clarifyBlock}>
-                {m.questions.map((q: ClarifyQuestion, qi: number) => (
-                  <View key={qi} style={styles.clarifyQuestion}>
-                    <Text style={styles.clarifyQuestionText}>{q.question}</Text>
+              {currentQuestion && (
+                <View style={styles.clarifyBlock}>
+                  <View style={styles.clarifyQuestion}>
+                    <Text style={styles.clarifyQuestionText}>
+                      {clarifyStep + 1}/{m.questions!.length} · {currentQuestion.question}
+                    </Text>
                     <View style={styles.clarifyOptions}>
-                      {q.options.map((opt: string, oi: number) => (
+                      {currentQuestion.options.map((opt: string, oi: number) => (
                         <Pressable
                           key={oi}
-                          testID={`clarify-opt-${qi}-${oi}`}
+                          testID={`clarify-opt-${clarifyStep}-${oi}`}
                           onPress={() => onPickAnswer(opt)}
                           style={({ pressed }) => [
                             styles.clarifyOptBtn,
@@ -327,14 +381,14 @@ function ChatTab({
                       ))}
                     </View>
                   </View>
-                ))}
-                <Text style={styles.clarifyFreeHint}>
-                  Poți alege una din opțiuni sau scrie tu ce vrei mai jos.
-                </Text>
-              </View>
-            )}
-          </View>
-        ))}
+                  <Text style={styles.clarifyFreeHint}>
+                    Poți alege una din opțiuni sau scrie tu ce vrei mai jos.
+                  </Text>
+                </View>
+              )}
+            </View>
+          );
+        })}
         {sending && (
           <View style={[styles.bubble, styles.aiBubble]}>
             <ActivityIndicator color={colors.accent} />
