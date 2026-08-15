@@ -47,7 +47,33 @@ export default function ProjectScreen() {
   const [stopping, setStopping] = useState(false);
   const [clarifyStep, setClarifyStep] = useState(0);
   const [clarifyAnswers, setClarifyAnswers] = useState<string[]>([]);
+  const [autoReviewJob, setAutoReviewJob] = useState<any>(null);
+  const autoReviewPollRef = useRef<any>(null);
   const scrollRef = useRef<ScrollView>(null);
+
+  const trackAutoReview = (jobId: string) => {
+    if (autoReviewPollRef.current) clearInterval(autoReviewPollRef.current);
+    setAutoReviewJob({ job_id: jobId, done: false, passes: [], phase: "main" });
+    autoReviewPollRef.current = setInterval(async () => {
+      try {
+        const job = await api.reviewStatus(jobId);
+        setAutoReviewJob(job);
+        if (job.done) {
+          clearInterval(autoReviewPollRef.current);
+          autoReviewPollRef.current = null;
+          load();
+        }
+      } catch {
+        /* keep polling */
+      }
+    }, 2000);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (autoReviewPollRef.current) clearInterval(autoReviewPollRef.current);
+    };
+  }, []);
 
   const removeProject = async () => {
     try {
@@ -112,6 +138,7 @@ export default function ProjectScreen() {
       } else {
         setMessages((m) => [...m, res.message]);
         if (res.all_files) setProject((p) => (p ? { ...p, files: res.all_files } : p));
+        if (res.auto_review_job_id) trackAutoReview(res.auto_review_job_id);
         setClarifyStep(0);
         setClarifyAnswers([]);
       }
@@ -241,6 +268,7 @@ export default function ProjectScreen() {
           onPick={pickModel}
           onStop={stopEverything}
           stopping={stopping}
+          autoReviewJob={autoReviewJob}
         />
       )}
       {tab === "files" && <FilesTab files={project?.files || []} />}
@@ -253,6 +281,7 @@ export default function ProjectScreen() {
           model={model}
           onStop={stopEverything}
           stopping={stopping}
+          autoReviewJob={autoReviewJob}
         />
       )}
       {tab === "github" && (
@@ -301,9 +330,14 @@ function ChatTab({
   onPick,
   onStop,
   stopping,
+  autoReviewJob,
 }: any) {
   const lastMsg = messages[messages.length - 1];
   const awaitingClarification = lastMsg && lastMsg.msg_type === "clarify" && !sending;
+  const reviewInProgress = autoReviewJob && !autoReviewJob.done;
+  const lastPass = reviewInProgress && autoReviewJob.passes?.length
+    ? autoReviewJob.passes[autoReviewJob.passes.length - 1]
+    : null;
 
   return (
     <KeyboardAvoidingView
@@ -398,6 +432,23 @@ function ChatTab({
             <Text style={styles.thinking}>Aria planifică și scrie cod…</Text>
           </View>
         )}
+        {reviewInProgress && (
+          <View style={styles.autoReviewCard}>
+            <View style={styles.autoReviewHead}>
+              <ActivityIndicator size="small" color={colors.accent2} />
+              <Text style={styles.autoReviewTitle}>
+                {autoReviewJob.total_passes || 0} verificări • agenții lucrează în fundal
+              </Text>
+            </View>
+            {lastPass && (
+              <Text style={styles.autoReviewDetail} numberOfLines={2}>
+                {lastPass.label}: {lastPass.issues?.length
+                  ? `${lastPass.issues.length} probleme găsite, se repară…`
+                  : "curat"}
+              </Text>
+            )}
+          </View>
+        )}
       </ScrollView>
       <View style={styles.inputBar}>
         {showModels && (
@@ -484,7 +535,6 @@ function ChatTab({
     </KeyboardAvoidingView>
   );
 }
-
 function FilesTab({ files }: { files: ProjFile[] }) {
   const [open, setOpen] = useState<string | null>(null);
   if (files.length === 0)
@@ -526,12 +576,24 @@ function FilesTab({ files }: { files: ProjFile[] }) {
   );
 }
 
-function ReviewTab({ id, onDone, show, hasFiles, model, onStop, stopping }: any) {
+function ReviewTab({ id, onDone, show, hasFiles, model, onStop, stopping, autoReviewJob }: any) {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<any>(null);
   const pollRef = useRef<any>(null);
+  const lastAutoJobId = useRef<string | null>(null);
 
   useEffect(() => () => pollRef.current && clearInterval(pollRef.current), []);
+
+  useEffect(() => {
+    if (autoReviewJob && autoReviewJob.job_id !== lastAutoJobId.current) {
+      lastAutoJobId.current = autoReviewJob.job_id;
+      setResult(autoReviewJob);
+      setRunning(!autoReviewJob.done);
+    } else if (autoReviewJob && autoReviewJob.job_id === lastAutoJobId.current) {
+      setResult(autoReviewJob);
+      setRunning(!autoReviewJob.done);
+    }
+  }, [autoReviewJob]);
 
   const run = async () => {
     setRunning(true);
@@ -839,6 +901,20 @@ const styles = StyleSheet.create({
     marginBottom: 2,
   },
   clarifyNudgeText: { color: colors.accent2, fontSize: 11, fontWeight: "600" },
+  autoReviewCard: {
+    alignSelf: "flex-start",
+    maxWidth: "92%",
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.accent2,
+    borderRadius: radius.md,
+    padding: space.sm + 2,
+    marginBottom: space.sm + 2,
+    gap: 6,
+  },
+  autoReviewHead: { flexDirection: "row", alignItems: "center", gap: 8 },
+  autoReviewTitle: { color: colors.accent2, fontSize: 12, fontWeight: "700" },
+  autoReviewDetail: { color: colors.muted, fontSize: 12, lineHeight: 17 },
   inputBar: {
     padding: space.sm + 2,
     paddingBottom: space.md,
