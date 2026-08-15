@@ -49,7 +49,9 @@ export default function ProjectScreen() {
   const [clarifyAnswers, setClarifyAnswers] = useState<string[]>([]);
   const [autoReviewJob, setAutoReviewJob] = useState<any>(null);
   const autoReviewPollRef = useRef<any>(null);
+  const chatPollRef = useRef<any>(null);
   const scrollRef = useRef<ScrollView>(null);
+  const chatJobKey = `chat_job_${id}`;
 
   const trackAutoReview = (jobId: string) => {
     if (autoReviewPollRef.current) clearInterval(autoReviewPollRef.current);
@@ -69,9 +71,65 @@ export default function ProjectScreen() {
     }, 2000);
   };
 
+  const finishChatJob = async (job: any) => {
+    if (chatPollRef.current) clearInterval(chatPollRef.current);
+    chatPollRef.current = null;
+    await storage.removeItem(chatJobKey);
+    setSending(false);
+    if (job.error) {
+      show(job.error, "err");
+    } else if (job.stopped) {
+      show("Oprit", "err");
+    } else if (job.message) {
+      setMessages((m) => {
+        const withoutTmp = m.filter((msg) => !msg.id.startsWith("tmp-"));
+        const already = withoutTmp.some((msg) => msg.id === job.message.id);
+        return already ? withoutTmp : [...withoutTmp, job.message];
+      });
+      if (job.auto_review_job_id) trackAutoReview(job.auto_review_job_id);
+      setClarifyStep(0);
+      setClarifyAnswers([]);
+      load();
+    }
+    setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 60);
+  };
+
+  const trackChatJob = (jobId: string) => {
+    if (chatPollRef.current) clearInterval(chatPollRef.current);
+    chatPollRef.current = setInterval(async () => {
+      try {
+        const job = await api.chatStatus(jobId);
+        if (job.done) await finishChatJob(job);
+      } catch {
+        /* keep polling — job might not be visible yet right after start */
+      }
+    }, 2000);
+  };
+
+  useEffect(() => {
+    (async () => {
+      const savedJobId = await storage.getItem(chatJobKey, "");
+      if (savedJobId) {
+        setSending(true);
+        try {
+          const job = await api.chatStatus(savedJobId as string);
+          if (job.done) {
+            await finishChatJob(job);
+          } else {
+            trackChatJob(savedJobId as string);
+          }
+        } catch {
+          await storage.removeItem(chatJobKey);
+          setSending(false);
+        }
+      }
+    })();
+  }, []);
+
   useEffect(() => {
     return () => {
       if (autoReviewPollRef.current) clearInterval(autoReviewPollRef.current);
+      if (chatPollRef.current) clearInterval(chatPollRef.current);
     };
   }, []);
 
@@ -131,22 +189,13 @@ export default function ProjectScreen() {
     setSending(true);
     setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
     try {
-      const res = await api.chat(id!, text, model);
-      if (res.stopped) {
-        setMessages((m) => m.filter((msg) => msg.id !== optimistic.id));
-        show("Oprit", "err");
-      } else {
-        setMessages((m) => [...m, res.message]);
-        if (res.all_files) setProject((p) => (p ? { ...p, files: res.all_files } : p));
-        if (res.auto_review_job_id) trackAutoReview(res.auto_review_job_id);
-        setClarifyStep(0);
-        setClarifyAnswers([]);
-      }
+      const { job_id } = await api.chatStart(id!, text, model);
+      await storage.setItem(chatJobKey, job_id);
+      trackChatJob(job_id);
     } catch (e: any) {
-      show(e.message, "err");
-    } finally {
+      setMessages((m) => m.filter((msg) => msg.id !== optimistic.id));
       setSending(false);
-      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 60);
+      show(e.message, "err");
     }
   };
 
@@ -166,6 +215,7 @@ export default function ProjectScreen() {
     const nextAnswers = [...clarifyAnswers, answerText];
     const nextStep = clarifyStep + 1;
     if (nextStep >= clarifyQuestions.length) {
+      // Ultima întrebare — combinăm toate întrebările+răspunsurile într-un singur mesaj
       const combined = clarifyQuestions
         .map((q, i) => `${q.question} ${nextAnswers[i]}`)
         .join("\n");
