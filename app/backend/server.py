@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks
+from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks, File, UploadFile, Form
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -13,6 +13,8 @@ import uuid
 import asyncio
 import time
 import requests
+import zipfile
+import io
 from pathlib import Path
 from pydantic import BaseModel
 from typing import List, Optional
@@ -290,11 +292,18 @@ BUILDER_SYSTEM = (
     "generic centered layouts, emoji icons; use real design systems, spacing, depth and polish). "
     "When the user asks to build or change an app/feature or write code, respond with: "
     "(1) a short friendly explanation and a concise numbered plan, then "
-    "(2) the FULL code for every file, each in this EXACT format:\n"
+    "(2) the FULL code for every file you are creating or changing, each in this EXACT format:\n"
     "### FILE: relative/path/to/file.ext\n"
     "```lang\n<complete file content>\n```\n"
     "Always output complete files (never omit code with '...'). Keep answers focused. "
-    "For questions that are not code, answer helpfully and concisely like a great engineer."
+    "For questions that are not code, answer helpfully and concisely like a great engineer.\n\n"
+    "If CURRENT PROJECT FILES are given in the prompt, that is the user's real, existing codebase "
+    "(possibly uploaded by them, not written by you). Read it carefully and make the requested change "
+    "on top of it — do not regenerate the whole project from scratch, and do not rewrite files that "
+    "don't need to change. Only output ### FILE blocks for files you actually created or modified.\n\n"
+    "If INSPIRATION / REFERENCE FILES are given, they are READ-ONLY context the user shared for style, "
+    "structure or ideas. NEVER output ### FILE blocks for these paths, never copy them verbatim into the "
+    "project, and never treat them as part of the editable codebase — only draw inspiration from them."
 )
 
 
@@ -489,6 +498,46 @@ AGENT_DEFS = [
 ]
 
 
+MAX_CONTEXT_FILE_CHARS = 6000
+MAX_CONTEXT_TOTAL_CHARS = 60000
+
+
+def build_files_context(files: list, inspiration_files: list) -> str:
+    """Render existing editable files and read-only inspiration files as context
+    blocks for the builder prompt, so Aria can see and extend an uploaded project."""
+    parts = []
+    if files:
+        parts.append("### CURRENT PROJECT FILES (editable — modify/extend these as needed):")
+        total = 0
+        for f in files:
+            content = f.get("content", "")
+            if len(content) > MAX_CONTEXT_FILE_CHARS:
+                content = content[:MAX_CONTEXT_FILE_CHARS] + "\n... [truncated, file is longer]"
+            block = f"### FILE: {f['path']}\n```\n{content}\n```"
+            if total + len(block) > MAX_CONTEXT_TOTAL_CHARS:
+                parts.append("... [more files omitted for length]")
+                break
+            parts.append(block)
+            total += len(block)
+    if inspiration_files:
+        parts.append(
+            "\n### INSPIRATION / REFERENCE FILES (READ-ONLY — for style/context only, "
+            "never edit or output these back, never merge them into the project files):"
+        )
+        total = 0
+        for f in inspiration_files:
+            content = f.get("content", "")
+            if len(content) > MAX_CONTEXT_FILE_CHARS:
+                content = content[:MAX_CONTEXT_FILE_CHARS] + "\n... [truncated]"
+            block = f"### REF FILE: {f['path']}\n```\n{content}\n```"
+            if total + len(block) > MAX_CONTEXT_TOTAL_CHARS:
+                parts.append("... [more reference files omitted for length]")
+                break
+            parts.append(block)
+            total += len(block)
+    return "\n\n".join(parts)
+
+
 def parse_files(text):
     files = []
     pattern = re.compile(r"###\s*FILE:\s*(?P<path>[^\n`]+?)\s*\n+```[^\n]*\n(?P<code>.*?)```",
@@ -506,6 +555,87 @@ def merge_files(existing, new):
     for f in new:
         by_path[f["path"]] = f
     return list(by_path.values())
+
+
+# ---------------- ZIP upload: extract text files, skip binaries/junk ----------------
+MAX_ZIP_BYTES = 30 * 1024 * 1024  # 30MB hard ceiling (well above the ~10MB typical case)
+MAX_FILES_FROM_ZIP = 800
+SKIP_DIR_PARTS = {
+    "node_modules", ".git", ".expo", ".next", "dist", "build", "__pycache__",
+    ".venv", "venv", ".idea", ".vscode", "ios/Pods", "android/.gradle",
+}
+SKIP_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".icns",
+    ".mp4", ".mov", ".avi", ".mp3", ".wav", ".ogg", ".flac",
+    ".zip", ".tar", ".gz", ".rar", ".7z",
+    ".ttf", ".otf", ".woff", ".woff2", ".eot",
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx",
+    ".so", ".dylib", ".dll", ".exe", ".bin", ".class", ".jar",
+    ".db", ".sqlite", ".sqlite3",
+    ".lock",
+}
+
+
+def _looks_binary(data: bytes) -> bool:
+    if b"\x00" in data[:4096]:
+        return True
+    try:
+        data[:65536].decode("utf-8")
+        return False
+    except UnicodeDecodeError:
+        return True
+
+
+def extract_zip_files(zip_bytes: bytes) -> list:
+    if len(zip_bytes) > MAX_ZIP_BYTES:
+        raise HTTPException(400, f"ZIP prea mare (max {MAX_ZIP_BYTES // (1024*1024)}MB).")
+
+    extracted = []
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            names = zf.namelist()
+            for name in names:
+                if len(extracted) >= MAX_FILES_FROM_ZIP:
+                    break
+                if name.endswith("/"):
+                    continue
+                parts = name.split("/")
+                if any(p in SKIP_DIR_PARTS for p in parts):
+                    continue
+                if any(p.startswith(".") and p not in (".env",) for p in parts[:-1]):
+                    continue
+                ext = "." + name.rsplit(".", 1)[-1].lower() if "." in parts[-1] else ""
+                if ext in SKIP_EXTENSIONS:
+                    continue
+                try:
+                    info = zf.getinfo(name)
+                    if info.file_size > 2 * 1024 * 1024:  # skip individual files over 2MB
+                        continue
+                    data = zf.read(name)
+                except Exception:
+                    continue
+                if _looks_binary(data):
+                    continue
+                try:
+                    text = data.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                # Normalize path: strip a single common top-level wrapper folder if present
+                extracted.append({"path": name, "content": text})
+    except zipfile.BadZipFile:
+        raise HTTPException(400, "Fișierul nu este un ZIP valid.")
+
+    if not extracted:
+        raise HTTPException(400, "Nu s-a găsit niciun fișier text util în ZIP.")
+
+    # Strip a single shared top-level folder (e.g. "myapp-main/") for cleaner paths
+    top_levels = {f["path"].split("/", 1)[0] for f in extracted if "/" in f["path"]}
+    if len(top_levels) == 1 and all("/" in f["path"] for f in extracted):
+        prefix = next(iter(top_levels)) + "/"
+        for f in extracted:
+            f["path"] = f["path"][len(prefix):]
+
+    return extracted
 
 
 def extract_json(text):
@@ -601,6 +731,7 @@ async def create_project(body: ProjectCreate):
         "name": body.name,
         "description": body.description or "",
         "files": [],
+        "inspiration_files": [],
         "created_at": now_iso(),
         "updated_at": now_iso(),
     }
@@ -627,6 +758,60 @@ async def delete_project(pid: str):
     await db.projects.delete_one({"id": pid})
     await db.messages.delete_many({"project_id": pid})
     STOP_FLAGS.pop(pid, None)
+    return {"ok": True}
+
+
+@api_router.post("/projects/{pid}/upload-zip")
+async def upload_project_zip(pid: str, file: UploadFile = File(...), mode: str = Form("replace")):
+    """Upload a ZIP of the user's own project. mode='replace' overwrites the editable
+    files (Set 2) with the ZIP contents, so Aria can edit/extend it directly."""
+    project = await db.projects.find_one({"id": pid})
+    if not project:
+        raise HTTPException(404, "Proiect inexistent")
+
+    zip_bytes = await file.read()
+    extracted = extract_zip_files(zip_bytes)
+
+    if mode == "merge":
+        merged = merge_files(project.get("files", []), extracted)
+    else:
+        merged = extracted
+
+    await db.projects.update_one(
+        {"id": pid},
+        {"$set": {"files": merged, "updated_at": now_iso()}},
+    )
+    sys_msg = {
+        "id": str(uuid.uuid4()), "project_id": pid, "role": "assistant",
+        "content": f"Am încărcat proiectul tău din ZIP — {len(extracted)} fișiere. "
+                    f"Poți să-mi ceri să adaug ceva nou sau să repar un bug.",
+        "created_at": now_iso(), "msg_type": "normal",
+    }
+    await db.messages.insert_one(dict(sys_msg))
+    return {"files_count": len(extracted), "all_files": merged}
+
+
+@api_router.post("/projects/{pid}/upload-inspiration")
+async def upload_inspiration_zip(pid: str, file: UploadFile = File(...)):
+    """Upload a ZIP as read-only inspiration/reference — Aria can see it for context
+    but never edits it, and it's never committed to GitHub."""
+    project = await db.projects.find_one({"id": pid})
+    if not project:
+        raise HTTPException(404, "Proiect inexistent")
+
+    zip_bytes = await file.read()
+    extracted = extract_zip_files(zip_bytes)
+
+    await db.projects.update_one(
+        {"id": pid},
+        {"$set": {"inspiration_files": extracted, "updated_at": now_iso()}},
+    )
+    return {"files_count": len(extracted)}
+
+
+@api_router.delete("/projects/{pid}/inspiration")
+async def clear_inspiration(pid: str):
+    await db.projects.update_one({"id": pid}, {"$set": {"inspiration_files": []}})
     return {"ok": True}
 
 
@@ -752,8 +937,6 @@ def _new_chat_job(job_id, pid):
         "message": None,
         "auto_review_job_id": None,
     }
-
-
 async def _run_chat_job(job_id: str, pid: str, message: str, model: Optional[str]):
     job = CHAT_JOBS[job_id]
     try:
@@ -813,8 +996,12 @@ async def _run_chat_job(job_id: str, pid: str, message: str, model: Optional[str
         for m in recent:
             role = "User" if m["role"] == "user" else "Aria"
             transcript += f"{role}: {m['content']}\n\n"
+        files_context = build_files_context(
+            project.get("files", []), project.get("inspiration_files", [])
+        )
         prompt = (
             f"Project: {project['name']}\nDescription: {project.get('description','')}\n\n"
+            f"{files_context}\n\n"
             f"Conversation so far:\n{transcript}\nUser (clarified brief): {brief}\n\nAria:"
         )
 
@@ -869,6 +1056,8 @@ async def chat_job_status(job_id: str):
     if not job:
         raise HTTPException(404, "Job inexistent")
     return job
+
+
 REVIEW_JOBS = {}
 
 
