@@ -44,6 +44,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ message, model }),
     }),
+  chatStart: (id: string, message: string, model?: string) =>
+    req(`/projects/${id}/chat/start`, {
+      method: "POST",
+      body: JSON.stringify({ message, model }),
+    }),
+  chatStatus: (jobId: string) => req(`/chat/${jobId}`),
   getModels: () => req("/models"),
   review: (id: string, model?: string) =>
     req(`/projects/${id}/review`, { method: "POST", body: JSON.stringify({ model }) }),
