@@ -52,10 +52,12 @@ export default function ProjectScreen() {
   const chatPollRef = useRef<any>(null);
   const scrollRef = useRef<ScrollView>(null);
   const chatJobKey = `chat_job_${id}`;
+  const reviewJobKey = `review_job_${id}`;
 
-  const trackAutoReview = (jobId: string) => {
+  const trackAutoReview = (jobId: string, skipSave?: boolean) => {
     if (autoReviewPollRef.current) clearInterval(autoReviewPollRef.current);
     setAutoReviewJob({ job_id: jobId, done: false, passes: [], phase: "main" });
+    if (!skipSave) storage.setItem(reviewJobKey, jobId);
     autoReviewPollRef.current = setInterval(async () => {
       try {
         const job = await api.reviewStatus(jobId);
@@ -63,6 +65,7 @@ export default function ProjectScreen() {
         if (job.done) {
           clearInterval(autoReviewPollRef.current);
           autoReviewPollRef.current = null;
+          await storage.removeItem(reviewJobKey);
           load();
         }
       } catch {
@@ -121,6 +124,27 @@ export default function ProjectScreen() {
         } catch {
           await storage.removeItem(chatJobKey);
           setSending(false);
+        }
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      const savedReviewId = await storage.getItem(reviewJobKey, "");
+      if (savedReviewId) {
+        try {
+          const job = await api.reviewStatus(savedReviewId as string);
+          if (job.done) {
+            await storage.removeItem(reviewJobKey);
+            setAutoReviewJob(job);
+            load();
+          } else {
+            setAutoReviewJob(job);
+            trackAutoReview(savedReviewId as string, true);
+          }
+        } catch {
+          await storage.removeItem(reviewJobKey);
         }
       }
     })();
@@ -332,6 +356,7 @@ export default function ProjectScreen() {
           onStop={stopEverything}
           stopping={stopping}
           autoReviewJob={autoReviewJob}
+          onStart={trackAutoReview}
         />
       )}
       {tab === "github" && (
@@ -626,13 +651,10 @@ function FilesTab({ files }: { files: ProjFile[] }) {
   );
 }
 
-function ReviewTab({ id, onDone, show, hasFiles, model, onStop, stopping, autoReviewJob }: any) {
+function ReviewTab({ id, onDone, show, hasFiles, model, onStop, stopping, autoReviewJob, onStart }: any) {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<any>(null);
-  const pollRef = useRef<any>(null);
   const lastAutoJobId = useRef<string | null>(null);
-
-  useEffect(() => () => pollRef.current && clearInterval(pollRef.current), []);
 
   useEffect(() => {
     if (autoReviewJob && autoReviewJob.job_id !== lastAutoJobId.current) {
@@ -642,6 +664,7 @@ function ReviewTab({ id, onDone, show, hasFiles, model, onStop, stopping, autoRe
     } else if (autoReviewJob && autoReviewJob.job_id === lastAutoJobId.current) {
       setResult(autoReviewJob);
       setRunning(!autoReviewJob.done);
+      if (autoReviewJob.done) onDone();
     }
   }, [autoReviewJob]);
 
@@ -650,22 +673,7 @@ function ReviewTab({ id, onDone, show, hasFiles, model, onStop, stopping, autoRe
     setResult(null);
     try {
       const { job_id } = await api.review(id, model);
-      pollRef.current = setInterval(async () => {
-        try {
-          const job = await api.reviewStatus(job_id);
-          setResult(job);
-          if (job.done) {
-            clearInterval(pollRef.current);
-            setRunning(false);
-            onDone();
-            if (job.error) show("Eroare la verificare", "err");
-            else if (job.phase === "stopped") show("Verificare oprită");
-            else show("Verificare completă — curat!");
-          }
-        } catch {
-          /* keep polling */
-        }
-      }, 2000);
+      onStart(job_id);
     } catch (e: any) {
       setRunning(false);
       show(e.message, "err");
