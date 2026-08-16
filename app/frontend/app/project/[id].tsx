@@ -13,6 +13,7 @@ import {
 } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
+import * as DocumentPicker from "expo-document-picker";
 import { colors, radius, space } from "@/src/theme";
 import { Header, PrimaryButton, useToast } from "@/src/components";
 import { api, Project, ProjFile } from "@/src/api";
@@ -345,7 +346,15 @@ export default function ProjectScreen() {
           autoReviewJob={autoReviewJob}
         />
       )}
-      {tab === "files" && <FilesTab files={project?.files || []} />}
+      {tab === "files" && (
+        <FilesTab
+          files={project?.files || []}
+          inspirationFiles={project?.inspiration_files || []}
+          projectId={id!}
+          show={show}
+          onFilesChanged={load}
+        />
+      )}
       {tab === "review" && (
         <ReviewTab
           id={id!}
@@ -610,47 +619,208 @@ function ChatTab({
     </KeyboardAvoidingView>
   );
 }
-function FilesTab({ files }: { files: ProjFile[] }) {
+
+function FilesTab({ files, inspirationFiles, projectId, show, onFilesChanged }: any) {
   const [open, setOpen] = useState<string | null>(null);
-  if (files.length === 0)
-    return (
-      <View style={styles.center}>
-        <Ionicons name="folder-open-outline" size={48} color={colors.faint} />
-        <Text style={styles.emptyText}>
-          Niciun fișier încă. Cere-i Ariei să genereze aplicația în Chat.
-        </Text>
-      </View>
-    );
+  const [uploadingProject, setUploadingProject] = useState(false);
+  const [uploadingInspiration, setUploadingInspiration] = useState(false);
+  const [confirmReplace, setConfirmReplace] = useState<{ uri: string; name: string } | null>(null);
+
+  const pickAndUploadProject = async () => {
+    const result = await DocumentPicker.getDocumentAsync({
+      type: ["application/zip", "application/x-zip-compressed"],
+      copyToCacheDirectory: true,
+    });
+    if (result.canceled || !result.assets?.[0]) return;
+    const asset = result.assets[0];
+    if (files.length > 0) {
+      setConfirmReplace({ uri: asset.uri, name: asset.name });
+    } else {
+      await doUploadProject(asset.uri, asset.name);
+    }
+  };
+
+  const doUploadProject = async (uri: string, name: string) => {
+    setUploadingProject(true);
+    try {
+      const res = await api.uploadProjectZip(projectId, uri, name, "replace");
+      show(`${res.files_count} fișiere încărcate din ZIP`);
+      onFilesChanged();
+    } catch (e: any) {
+      show(e.message, "err");
+    } finally {
+      setUploadingProject(false);
+      setConfirmReplace(null);
+    }
+  };
+
+  const pickAndUploadInspiration = async () => {
+    const result = await DocumentPicker.getDocumentAsync({
+      type: ["application/zip", "application/x-zip-compressed"],
+      copyToCacheDirectory: true,
+    });
+    if (result.canceled || !result.assets?.[0]) return;
+    const asset = result.assets[0];
+    setUploadingInspiration(true);
+    try {
+      const res = await api.uploadInspirationZip(projectId, asset.uri, asset.name);
+      show(`${res.files_count} fișiere de inspirație adăugate`);
+      onFilesChanged();
+    } catch (e: any) {
+      show(e.message, "err");
+    } finally {
+      setUploadingInspiration(false);
+    }
+  };
+
+  const removeInspiration = async () => {
+    try {
+      await api.clearInspiration(projectId);
+      show("Inspirație eliminată");
+      onFilesChanged();
+    } catch (e: any) {
+      show(e.message, "err");
+    }
+  };
+
   return (
     <ScrollView contentContainerStyle={{ padding: space.md, paddingBottom: 40 }}>
-      {files.map((f) => (
-        <View key={f.path} style={styles.fileCard}>
-          <Pressable
-            testID={`file-${f.path}`}
-            style={styles.fileHead}
-            onPress={() => setOpen(open === f.path ? null : f.path)}
-          >
-            <Ionicons name="document-text-outline" size={18} color={colors.accent2} />
-            <Text style={styles.filePath} numberOfLines={1}>
-              {f.path}
-            </Text>
-            <Ionicons
-              name={open === f.path ? "chevron-up" : "chevron-down"}
-              size={18}
-              color={colors.faint}
-            />
-          </Pressable>
-          {open === f.path && (
-            <ScrollView horizontal style={styles.codeWrap}>
-              <Text style={styles.code}>{f.content}</Text>
-            </ScrollView>
+      <View style={styles.uploadRow}>
+        <Pressable
+          testID="upload-project-zip"
+          onPress={pickAndUploadProject}
+          disabled={uploadingProject}
+          style={({ pressed }) => [styles.uploadBtn, pressed && { opacity: 0.8 }]}
+        >
+          {uploadingProject ? (
+            <ActivityIndicator color={colors.accent} size="small" />
+          ) : (
+            <Ionicons name="cloud-upload-outline" size={16} color={colors.accent} />
           )}
+          <Text style={styles.uploadBtnText}>
+            {files.length > 0 ? "Înlocuiește cu ZIP" : "Încarcă proiectul tău (ZIP)"}
+          </Text>
+        </Pressable>
+        <Pressable
+          testID="upload-inspiration-zip"
+          onPress={pickAndUploadInspiration}
+          disabled={uploadingInspiration}
+          style={({ pressed }) => [styles.uploadBtnGhost, pressed && { opacity: 0.8 }]}
+        >
+          {uploadingInspiration ? (
+            <ActivityIndicator color={colors.accent2} size="small" />
+          ) : (
+            <Ionicons name="sparkles-outline" size={16} color={colors.accent2} />
+          )}
+          <Text style={styles.uploadBtnGhostText}>Inspirație</Text>
+        </Pressable>
+      </View>
+
+      {inspirationFiles && inspirationFiles.length > 0 && (
+        <View style={styles.inspirationSection}>
+          <View style={styles.inspirationHead}>
+            <Ionicons name="sparkles" size={14} color={colors.accent2} />
+            <Text style={styles.inspirationTitle}>
+              Inspirație ({inspirationFiles.length}) — doar referință, Aria nu o editează
+            </Text>
+            <Pressable testID="remove-inspiration" onPress={removeInspiration} hitSlop={8}>
+              <Ionicons name="close-circle" size={18} color={colors.faint} />
+            </Pressable>
+          </View>
+          {inspirationFiles.map((f: ProjFile) => (
+            <View key={f.path} style={styles.fileCard}>
+              <Pressable
+                style={styles.fileHead}
+                onPress={() => setOpen(open === "insp:" + f.path ? null : "insp:" + f.path)}
+              >
+                <Ionicons name="eye-outline" size={18} color={colors.faint} />
+                <Text style={styles.filePath} numberOfLines={1}>
+                  {f.path}
+                </Text>
+                <Ionicons
+                  name={open === "insp:" + f.path ? "chevron-up" : "chevron-down"}
+                  size={18}
+                  color={colors.faint}
+                />
+              </Pressable>
+              {open === "insp:" + f.path && (
+                <ScrollView horizontal style={styles.codeWrap}>
+                  <Text style={styles.code}>{f.content}</Text>
+                </ScrollView>
+              )}
+            </View>
+          ))}
         </View>
-      ))}
+      )}
+
+      {files.length === 0 ? (
+        <View style={styles.center}>
+          <Ionicons name="folder-open-outline" size={48} color={colors.faint} />
+          <Text style={styles.emptyText}>
+            Niciun fișier încă. Cere-i Ariei să genereze aplicația în Chat, sau încarcă un ZIP.
+          </Text>
+        </View>
+      ) : (
+        files.map((f: ProjFile) => (
+          <View key={f.path} style={styles.fileCard}>
+            <Pressable
+              testID={`file-${f.path}`}
+              style={styles.fileHead}
+              onPress={() => setOpen(open === f.path ? null : f.path)}
+            >
+              <Ionicons name="document-text-outline" size={18} color={colors.accent2} />
+              <Text style={styles.filePath} numberOfLines={1}>
+                {f.path}
+              </Text>
+              <Ionicons
+                name={open === f.path ? "chevron-up" : "chevron-down"}
+                size={18}
+                color={colors.faint}
+              />
+            </Pressable>
+            {open === f.path && (
+              <ScrollView horizontal style={styles.codeWrap}>
+                <Text style={styles.code}>{f.content}</Text>
+              </ScrollView>
+            )}
+          </View>
+        ))
+      )}
+
+      <Modal
+        visible={!!confirmReplace}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setConfirmReplace(null)}
+      >
+        <View style={styles.confirmWrap}>
+          <View style={styles.confirmCard}>
+            <Ionicons name="warning" size={30} color={colors.warn} />
+            <Text style={styles.confirmTitle}>Înlocuiești codul curent?</Text>
+            <Text style={styles.confirmText}>
+              Ai deja {files.length} fișiere generate/editate. Încărcarea ZIP-ului le va
+              înlocui complet cu conținutul lui.
+            </Text>
+            <View style={styles.confirmRow}>
+              <Pressable
+                style={[styles.confirmBtn, styles.cancelBtn]}
+                onPress={() => setConfirmReplace(null)}
+              >
+                <Text style={styles.cancelText}>Anulează</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.confirmBtn, styles.delBtn]}
+                onPress={() => confirmReplace && doUploadProject(confirmReplace.uri, confirmReplace.name)}
+              >
+                <Text style={styles.delText}>Înlocuiește</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
 }
-
 function ReviewTab({ id, onDone, show, hasFiles, model, onStop, stopping, autoReviewJob, onStart }: any) {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<any>(null);
@@ -957,6 +1127,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 6,
     marginBottom: 2,
+marginBottom: 2,
   },
   clarifyNudgeText: { color: colors.accent2, fontSize: 11, fontWeight: "600" },
   autoReviewCard: {
@@ -1053,6 +1224,48 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  uploadRow: { flexDirection: "row", gap: space.sm, marginBottom: space.md },
+  uploadBtn: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.accent,
+    borderRadius: radius.md,
+    paddingVertical: 11,
+  },
+  uploadBtnText: { color: colors.accent, fontSize: 13, fontWeight: "700" },
+  uploadBtnGhost: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.accent2,
+    borderRadius: radius.md,
+    paddingVertical: 11,
+    paddingHorizontal: 14,
+  },
+  uploadBtnGhostText: { color: colors.accent2, fontSize: 13, fontWeight: "700" },
+  inspirationSection: {
+    marginBottom: space.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    padding: space.sm,
+  },
+  inspirationHead: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginBottom: space.sm,
+    paddingHorizontal: 4,
+  },
+  inspirationTitle: { color: colors.accent2, fontSize: 11, fontWeight: "700", flex: 1 },
   fileCard: {
     backgroundColor: colors.surface,
     borderWidth: 1,
