@@ -20,12 +20,41 @@ async function req(path: string, opts: RequestInit = {}) {
   return data;
 }
 
+async function uploadZip(path: string, fileUri: string, fileName: string, extraFields?: Record<string, string>) {
+  const form = new FormData();
+  form.append("file", {
+    uri: fileUri,
+    name: fileName,
+    type: "application/zip",
+  } as any);
+  if (extraFields) {
+    Object.entries(extraFields).forEach(([k, v]) => form.append(k, v));
+  }
+  const res = await fetch(`${API}${path}`, {
+    method: "POST",
+    body: form as any,
+  });
+  const text = await res.text();
+  let data: any = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = text;
+  }
+  if (!res.ok) {
+    const msg = (data && (data.detail || data.message)) || `Eroare ${res.status}`;
+    throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+  }
+  return data;
+}
+
 export type ProjFile = { path: string; content: string };
 export type Project = {
   id: string;
   name: string;
   description: string;
   files: ProjFile[];
+  inspiration_files?: ProjFile[];
   created_at: string;
   updated_at: string;
 };
@@ -55,6 +84,12 @@ export const api = {
     req(`/projects/${id}/review`, { method: "POST", body: JSON.stringify({ model }) }),
   reviewStatus: (jobId: string) => req(`/review/${jobId}`),
   stop: (id: string) => req(`/projects/${id}/stop?kind=both`, { method: "POST" }),
+
+  uploadProjectZip: (id: string, fileUri: string, fileName: string, mode: "replace" | "merge" = "replace") =>
+    uploadZip(`/projects/${id}/upload-zip`, fileUri, fileName, { mode }),
+  uploadInspirationZip: (id: string, fileUri: string, fileName: string) =>
+    uploadZip(`/projects/${id}/upload-inspiration`, fileUri, fileName),
+  clearInspiration: (id: string) => req(`/projects/${id}/inspiration`, { method: "DELETE" }),
 
   listNotes: () => req("/notes"),
   createNote: (title: string, content: string) =>
