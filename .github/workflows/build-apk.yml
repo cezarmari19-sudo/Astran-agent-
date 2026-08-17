@@ -17,7 +17,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: app/frontend
-        run: yarn install --frozen-lockfile
+        run: yarn install
 
       - name: Set up EAS CLI
         uses: expo/expo-github-action@v8
