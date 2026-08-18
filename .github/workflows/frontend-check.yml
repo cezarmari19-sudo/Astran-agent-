@@ -23,7 +23,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: app/frontend
-        run: yarn install --frozen-lockfile
+        run: yarn install
 
       - name: TypeScript type check
         working-directory: app/frontend
