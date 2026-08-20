@@ -972,6 +972,8 @@ def _new_chat_job(job_id, pid):
         "message": None,
         "auto_review_job_id": None,
     }
+
+
 async def _run_chat_job(job_id: str, pid: str, message: str, model: Optional[str]):
     job = CHAT_JOBS[job_id]
     try:
@@ -1368,10 +1370,11 @@ async def github_commit(body: GithubCommitIn):
         sha = None
         try:
             g = requests.get(url, params={"ref": body.branch}, headers=headers, timeout=15)
+            logger.info(f"github commit: GET {path} -> {g.status_code}")
             if g.status_code == 200:
                 sha = g.json().get("sha")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"github commit: GET {path} failed: {e}")
         payload = {"message": body.message, "branch": body.branch,
                    "content": base64.b64encode(f["content"].encode()).decode()}
         if sha:
@@ -1379,9 +1382,17 @@ async def github_commit(body: GithubCommitIn):
         try:
             p = requests.put(url, headers=headers, json=payload, timeout=20)
             ok = p.status_code in (200, 201)
+            err_detail = None
+            if not ok:
+                try:
+                    err_detail = p.json().get("message", p.text[:300])
+                except Exception:
+                    err_detail = p.text[:300]
+                logger.error(f"github commit: PUT {path} -> {p.status_code}: {err_detail}")
             results.append({"path": path, "ok": ok, "status": p.status_code,
-                            "error": None if ok else p.json().get("message", "")})
+                            "error": None if ok else err_detail})
         except Exception as e:
+            logger.error(f"github commit: PUT {path} raised: {e}")
             results.append({"path": path, "ok": False, "status": 0, "error": str(e)})
 
     committed = sum(1 for r in results if r["ok"])
