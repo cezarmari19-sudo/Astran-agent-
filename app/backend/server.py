@@ -388,11 +388,12 @@ AGENT_DEFS = [
             "here — only functional correctness. For each bug, explain the exact failure scenario (what "
             "input or sequence of actions triggers it), then fix it properly — not just a patch that hides "
             "the symptom.\n"
+            "Do NOT fix anything yourself — only detect and report every issue you find. A separate step will fix them one at a time.\n"
             "Respond with STRICT JSON only, no markdown:\n"
             '{"issues":[{"severity":"high|medium|low","file":"path","description":"...","fix":"..."}],'
-            '"files":[{"path":"...","content":"<full corrected file>"}],"summary":"..."}\n'
+            '"summary":"..."}\n'
             "If genuinely no bugs after real scrutiny, return "
-            '{"issues":[],"files":[],"summary":"No bugs found."}. '
+            '{"issues":[],"summary":"No bugs found."}. '
             "Only include files you actually changed, with FULL new content."
         ),
     },
@@ -407,11 +408,12 @@ AGENT_DEFS = [
             "bad typography choices, inconsistent spacing scale. For each issue, explain what a real "
             "designer would notice and why it undermines trust or usability. Fix every issue with real "
             "design improvements, not cosmetic patches.\n"
+            "Do NOT fix anything yourself — only detect and report every issue you find. A separate step will fix them one at a time.\n"
             "Respond with STRICT JSON only, no markdown:\n"
             '{"issues":[{"severity":"high|medium|low","file":"path","description":"...","fix":"..."}],'
-            '"files":[{"path":"...","content":"<full corrected file>"}],"summary":"..."}\n'
+            '"summary":"..."}\n'
             "If genuinely beautiful already, return "
-            '{"issues":[],"files":[],"summary":"Design is solid."}. '
+            '{"issues":[],"summary":"Design is solid."}. '
             "Only include files you actually changed, with FULL new content."
         ),
     },
@@ -426,11 +428,12 @@ AGENT_DEFS = [
             "with opinions and taste. For each issue, name specifically what pattern gives it away and "
             "what a real product team would have done instead. Fix every issue so the app feels crafted, "
             "not generated.\n"
+            "Do NOT fix anything yourself — only detect and report every issue you find. A separate step will fix them one at a time.\n"
             "Respond with STRICT JSON only, no markdown:\n"
             '{"issues":[{"severity":"high|medium|low","file":"path","description":"...","fix":"..."}],'
-            '"files":[{"path":"...","content":"<full corrected file>"}],"summary":"..."}\n'
+            '"summary":"..."}\n'
             "If it already looks human-made, return "
-            '{"issues":[],"files":[],"summary":"Looks human-made."}. '
+            '{"issues":[],"summary":"Looks human-made."}. '
             "Only include files you actually changed, with FULL new content."
         ),
     },
@@ -445,11 +448,12 @@ AGENT_DEFS = [
             "edge case (empty input, slow network, going back mid-flow). Find points where a normal user "
             "would get confused, stuck, see a blank/broken state, or hit a dead end — and explain exactly "
             "what they'd be thinking/feeling at that moment. Fix every issue you find.\n"
+            "Do NOT fix anything yourself — only detect and report every issue you find. A separate step will fix them one at a time.\n"
             "Respond with STRICT JSON only, no markdown:\n"
             '{"issues":[{"severity":"high|medium|low","file":"path","description":"...","fix":"..."}],'
-            '"files":[{"path":"...","content":"<full corrected file>"}],"summary":"..."}\n'
+            '"summary":"..."}\n'
             "If a normal user could use this smoothly end-to-end, return "
-            '{"issues":[],"files":[],"summary":"Smooth for a normal user."}. '
+            '{"issues":[],"summary":"Smooth for a normal user."}. '
             "Only include files you actually changed, with FULL new content."
         ),
     },
@@ -465,11 +469,12 @@ AGENT_DEFS = [
             "exactly how an attacker would extract it (inspect network traffic, decompile the app, read "
             "the bundle) and what damage they could do with it. Fix every exposure by moving secrets "
             "server-side and removing leaks.\n"
+            "Do NOT fix anything yourself — only detect and report every issue you find. A separate step will fix them one at a time.\n"
             "Respond with STRICT JSON only, no markdown:\n"
             '{"issues":[{"severity":"high|medium|low","file":"path","description":"...","fix":"..."}],'
-            '"files":[{"path":"...","content":"<full corrected file>"}],"summary":"..."}\n'
+            '"summary":"..."}\n'
             "If nothing is exposed, return "
-            '{"issues":[],"files":[],"summary":"No secret exposure found."}. '
+            '{"issues":[],"summary":"No secret exposure found."}. '
             "Only include files you actually changed, with FULL new content."
         ),
     },
@@ -484,11 +489,12 @@ AGENT_DEFS = [
             "magic numbers/strings that should be named constants, duplicated logic that should be "
             "extracted, and anything that would slow down a future maintainer. For each finding, explain "
             "the maintainability or correctness cost of leaving it as-is. Fix what you find.\n"
+            "Do NOT fix anything yourself — only detect and report every issue you find. A separate step will fix them one at a time.\n"
             "Respond with STRICT JSON only, no markdown:\n"
             '{"issues":[{"severity":"high|medium|low","file":"path","description":"...","fix":"..."}],'
-            '"files":[{"path":"...","content":"<full corrected file>"}],"summary":"..."}\n'
+            '"summary":"..."}\n'
             "If the code is genuinely clean, return "
-            '{"issues":[],"files":[],"summary":"Code is clean."}. '
+            '{"issues":[],"summary":"Code is clean."}. '
             "Only include files you actually changed, with FULL new content."
         ),
     },
@@ -503,11 +509,12 @@ AGENT_DEFS = [
             "access, skip payment, or manipulate scores/results. For each exploit, explain the exact "
             "sequence of requests or actions that achieves it, and why client-side-only checks are never "
             "enough. Fix it by adding proper server-side validation and closing logic gaps.\n"
+            "Do NOT fix anything yourself — only detect and report every issue you find. A separate step will fix them one at a time.\n"
             "Respond with STRICT JSON only, no markdown:\n"
             '{"issues":[{"severity":"high|medium|low","file":"path","description":"...","fix":"..."}],'
-            '"files":[{"path":"...","content":"<full corrected file>"}],"summary":"..."}\n'
+            '"summary":"..."}\n'
             "If nothing is exploitable, return "
-            '{"issues":[],"files":[],"summary":"No exploitable cheats found."}. '
+            '{"issues":[],"summary":"No exploitable cheats found."}. '
             "Only include files you actually changed, with FULL new content."
         ),
     },
@@ -522,11 +529,12 @@ AGENT_DEFS = [
             "insecure storage of sensitive data on-device, unvalidated input reaching the database. For "
             "each vulnerability, explain the concrete attack path an intruder would use. Fix every "
             "vulnerability you find with proper server-side defenses, not client-side band-aids.\n"
+            "Do NOT fix anything yourself — only detect and report every issue you find. A separate step will fix them one at a time.\n"
             "Respond with STRICT JSON only, no markdown:\n"
             '{"issues":[{"severity":"high|medium|low","file":"path","description":"...","fix":"..."}],'
-            '"files":[{"path":"...","content":"<full corrected file>"}],"summary":"..."}\n'
+            '"summary":"..."}\n'
             "If nothing is vulnerable, return "
-            '{"issues":[],"files":[],"summary":"No vulnerabilities found."}. '
+            '{"issues":[],"summary":"No vulnerabilities found."}. '
             "Only include files you actually changed, with FULL new content."
         ),
     },
@@ -1114,6 +1122,9 @@ def _new_review_job(job_id, pid):
 
 
 async def _run_single_agent_pass(pid, model, job, agent_def, current_files, pass_label):
+    """Agent scans ALL current files and reports every issue it finds, but does NOT
+    fix anything itself. Only the FIRST reported issue is then sent separately to
+    the builder model for a single, focused fix — never multiple issues at once."""
     blob = "\n\n".join([f"### FILE: {p}\n```\n{c}\n```" for p, c in current_files.items()])
     prompt = f"{pass_label} — Current project files:\n\n{blob}"
     raw = await llm_generate(agent_def["system"], prompt, f"review-{pid}-{agent_def['key']}", model)
@@ -1121,20 +1132,40 @@ async def _run_single_agent_pass(pid, model, job, agent_def, current_files, pass
     if not data:
         data = {"issues": [{"severity": "low", "file": "-",
                             "description": "Agentul a raspuns in format liber.",
-                            "fix": raw[:500]}], "files": [], "summary": "Format neuzual."}
+                            "fix": raw[:500]}], "summary": "Format neuzual."}
     issues = data.get("issues", [])
-    fixed = data.get("files", [])
-    for f in fixed:
-        if f.get("path"):
-            current_files[f["path"]] = f.get("content", current_files.get(f["path"], ""))
+    fixed_count = 0
+
+    if issues:
+        first_issue = issues[0]
+        target_path = first_issue.get("file")
+        target_content = current_files.get(target_path, "") if target_path else ""
+        fix_prompt = (
+            f"You previously found this ONE specific issue during a {agent_def['label']} review:\n\n"
+            f"File: {target_path}\n"
+            f"Severity: {first_issue.get('severity', 'medium')}\n"
+            f"Problem: {first_issue.get('description', '')}\n"
+            f"Suggested fix direction: {first_issue.get('fix', '')}\n\n"
+            f"Current content of that file:\n```\n{target_content}\n```\n\n"
+            f"Fix ONLY this one issue in this one file. Output the complete corrected file in this "
+            f"EXACT format, nothing else:\n### FILE: {target_path}\n```lang\n<complete corrected file>\n```"
+        )
+        fix_raw = await llm_generate(BUILDER_SYSTEM, fix_prompt, f"review-fix-{pid}-{agent_def['key']}", model)
+        fixed_files = parse_files(fix_raw)
+        for f in fixed_files:
+            if f.get("path"):
+                current_files[f["path"]] = f.get("content", current_files.get(f["path"], ""))
+                fixed_count += 1
 
     job["passes"].append({
         "agent": agent_def["key"],
         "agent_label": agent_def["label"],
         "label": pass_label,
         "issues": issues,
-        "summary": data.get("summary", ""),
-        "fixed_count": len(fixed),
+        "summary": data.get("summary", "") or (
+            f"{len(issues)} probleme găsite, s-a reparat prima." if issues else "Curat."
+        ),
+        "fixed_count": fixed_count,
     })
     job["total_passes"] = len(job["passes"])
 
