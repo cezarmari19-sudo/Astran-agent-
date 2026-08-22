@@ -1781,13 +1781,44 @@ AGENT_DEFS = [
             "- incorrect;\n"
             "- stale;\n"
             "- misleading;\n"
-            "- explaining obvious syibility is identifying security vulnerabilities that could allow an "
+            "- explaining obvious code rather than the non-obvious reasoning behind a decision;\n"
+            "- missing where genuinely necessary to explain a non-obvious constraint or decision.\n\n"
+            "14. OUTPUT FORMAT\n"
+            "Respond with STRICT JSON only. No markdown and no commentary outside JSON.\n\n"
+            "Use exactly this structure:\n"
+            '{\n'
+            '  "issues": [\n'
+            '    {\n'
+            '      "severity": "high|medium|low",\n'
+            '      "category": "dead_code|duplication|complexity|types|error_handling|naming|magic_values|responsibility|coupling|consistency|api_design|comments|other",\n'
+            '      "file": "relative/path/to/file",\n'
+            '      "location": "function/class/section",\n'
+            '      "description": "What is wrong.",\n'
+            '      "why": "Why it matters for maintainability, clarity, or correctness.",\n'
+            '      "fix": "Specific guidance for the separate fixing agent."\n'
+            '    }\n'
+            '  ],\n'
+            '  "summary": "Short assessment of static code quality."\n'
+            '}\n\n'
+            "If genuinely no meaningful static-quality problems are found, return:\n"
+            '{"issues":[],"summary":"Code quality is solid."}\n\n'
+            "FINAL STANDARD:\n"
+            "Review this code as a strict but fair senior engineer approving a production pull request. "
+            "Report only real, evidence-based maintainability and correctness problems, explain their impact, "
+            "and avoid noise."
+        ),
+    },
+    {
+        "key": "security",
+        "label": "Security review",
+        "system": (
+            SENIOR_ENGINEER_PREFIX +
+            "Your exclusive responsibility is identifying security vulnerabilities that could allow an "
             "unauthorized attacker to compromise the application's confidentiality, integrity, or availability. "
             "Act as a defensive application-security engineer performing an adversarial security assessment "
             "of the codebase before production deployment.\n\n"
             "IMPORTANT ROLE BOUNDARY:\n"
             "Do NOT focus primarily on cheating, game/business-logic abuse, or server-side secret exposure. "
-            "The Cheater agent handles unfair advantages and business-logic exploits. "
             "The Server Secrets agent handles exposed credentials and secrets. "
             "Your focus is the broader technical attack surface: authentication, authorization, injection, "
             "data access, request handling, browser/client security, server security, and unsafe trust boundaries.\n\n"
@@ -2054,22 +2085,6 @@ def build_files_context(files: list, inspiration_files: list) -> str:
                 break
             parts.append(block)
             total += len(block)
-if inspiration_files:
-        parts.append(
-            "\n### INSPIRATION / REFERENCE FILES (READ-ONLY — for style/context only, "
-            "never edit or output these back, never merge them into the project files):"
-        )
-        total = 0
-        for f in inspiration_files:
-            content = f.get("content", "")
-            if len(content) > MAX_CONTEXT_FILE_CHARS:
-                content = content[:MAX_CONTEXT_FILE_CHARS] + "\n... [truncated]"
-            block = f"### REF FILE: {f['path']}\n```\n{content}\n```"
-            if total + len(block) > MAX_CONTEXT_TOTAL_CHARS:
-                parts.append("... [more reference files omitted for length]")
-                break
-            parts.append(block)
-            total += len(block)
     return "\n\n".join(parts)
 
 
@@ -2256,6 +2271,8 @@ async def list_models():
             "openai": len(OPENAI_API_KEYS),
         },
     }
+
+
 # Projects
 @api_router.post("/projects")
 async def create_project(body: ProjectCreate):
@@ -2314,7 +2331,7 @@ async def upload_project_zip(pid: str, file: UploadFile = File(...), mode: str =
         {"id": pid},
         {"$set": {"files": merged, "updated_at": now_iso()}},
     )
-sys_msg = {
+    sys_msg = {
         "id": str(uuid.uuid4()), "project_id": pid, "role": "assistant",
         "content": f"Am încărcat proiectul tău din ZIP — {len(extracted)} fișiere. "
                     f"Poți să-mi ceri să adaug ceva nou sau să repar un bug.",
@@ -2474,7 +2491,7 @@ def _new_chat_job(job_id, pid):
 
 async def _run_chat_job(job_id: str, pid: str, message: str, model: Optional[str]):
     job = CHAT_JOBS[job_id]
-try:
+    try:
         project = await db.projects.find_one({"id": pid})
         if not project:
             job["error"] = "Proiect inexistent"
@@ -2706,7 +2723,7 @@ async def _run_review(job_id, pid, model=None):
                 )
                 await _persist(pid, job, current)
                 if found_issue:
-astate["clean_streak"] = 0
+                    astate["clean_streak"] = 0
                 else:
                     astate["clean_streak"] += 1
                     if astate["clean_streak"] >= 2:
