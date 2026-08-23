@@ -24,6 +24,12 @@ import google.generativeai as genai
 import anthropic
 import openai
 
+from agent_tools import (
+    run_agent_turn, new_conversation, append_assistant_turn,
+    append_tool_results, ToolCall, MAX_AGENT_STEPS,
+)
+from sandbox import sandbox_manager, SandboxError
+
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
@@ -76,7 +82,7 @@ STOP_FLAGS: dict = {}
 
 def _stop_flags(pid: str):
     if pid not in STOP_FLAGS:
-        STOP_FLAGS[pid] = {"chat": False, "review": False}
+        STOP_FLAGS[pid] = {"chat": False, "review": False, "agent": False}
     return STOP_FLAGS[pid]
 
 
@@ -265,6 +271,116 @@ async def llm_generate(system_message, prompt, session_id, model=None):
             status_code=502,
             detail=f"AI indisponibil ({provider}): {e}"
         )
+
+
+# ---------------- Agentic tool loop ----------------
+# Executes tool calls the model makes (run_command / write_files / read_file /
+# list_files) against the project's sandbox container, and drives the
+# provider-neutral turn loop from agent_tools.py until the model returns a
+# final text answer or MAX_AGENT_STEPS is hit.
+
+async def _execute_tool_call(pid: str, tc: ToolCall) -> str:
+    try:
+        if tc.name == "run_command":
+            command = tc.arguments.get("command", "")
+            if not command:
+                return "Eroare: niciun 'command' furnizat."
+            result = await sandbox_manager.run_command(pid, command)
+            return (
+                f"exit_code: {result['exit_code']}\n"
+                f"timed_out: {result['timed_out']}\n"
+                f"output:\n{result['stdout']}"
+            )
+        if tc.name == "write_files":
+            files = tc.arguments.get("files", [])
+            if not files:
+                return "Eroare: nicio intrare in 'files'."
+            await sandbox_manager.write_files(pid, files)
+            # Mirror into Mongo immediately so Files tab / review / GitHub
+            # commit always see what the agent has written, even if the
+            # job is interrupted before finishing.
+            project = await db.projects.find_one({"id": pid})
+            current = {f["path"]: f["content"] for f in project.get("files", [])} if project else {}
+            for f in files:
+                current[f["path"]] = f.get("content", "")
+            merged_list = [{"path": p, "content": c} for p, c in current.items()]
+            await db.projects.update_one(
+                {"id": pid}, {"$set": {"files": merged_list, "updated_at": now_iso()}}
+            )
+            paths = ", ".join(f.get("path", "?") for f in files)
+            return f"Scris cu succes {len(files)} fisiere: {paths}"
+        if tc.name == "read_file":
+            path = tc.arguments.get("path", "")
+            content = await sandbox_manager.read_file(pid, path)
+            return content
+        if tc.name == "list_files":
+            path = tc.arguments.get("path", ".")
+            return await sandbox_manager.list_files(pid, path)
+        return f"Eroare: tool necunoscut '{tc.name}'"
+    except SandboxError as e:
+        return f"Eroare sandbox: {e}"
+    except Exception as e:
+        logger.error(f"tool execution failed ({tc.name}): {e}")
+        return f"Eroare la executarea tool-ului '{tc.name}': {e}"
+
+
+async def run_agentic_builder(pid: str, model: str, system_message: str, user_message: str,
+                               on_step=None) -> dict:
+    """Drives a full agentic loop: model can call tools repeatedly (run
+    commands, write/read files, list files) until it produces a final
+    answer or MAX_AGENT_STEPS is reached. Returns a transcript summary and
+    the final text. `on_step` (optional) is called after each tool
+    execution with a dict, useful for streaming progress to the client."""
+    provider = _provider_for_model(model)
+    keys = _KEYS_BY_PROVIDER[provider]
+    if not keys:
+        raise HTTPException(400, f"Nicio cheie configurata pentru providerul {provider}")
+    api_key = keys[_key_cursor[provider] % len(keys)]
+
+    conversation = new_conversation(provider, user_message)
+    steps_log = []
+
+    for step in range(MAX_AGENT_STEPS):
+        if is_stopped(pid, "agent"):
+            clear_stop(pid, "agent")
+            return {
+                "final_text": "Oprit de utilizator.", "steps": steps_log,
+                "step_count": step, "stopped": True,
+            }
+
+        try:
+            turn = await run_agent_turn(provider, api_key, model, system_message, conversation)
+        except Exception as e:
+            logger.error(f"agent turn failed at step {step}: {e}")
+            raise HTTPException(502, f"AI indisponibil ({provider}): {e}")
+
+        conversation = append_assistant_turn(provider, conversation, turn)
+
+        if turn.is_final:
+            return {"final_text": turn.text or "", "steps": steps_log, "step_count": step + 1}
+
+        results = []
+        for tc in turn.tool_calls:
+            if is_stopped(pid, "agent"):
+                clear_stop(pid, "agent")
+                return {
+                    "final_text": "Oprit de utilizator.", "steps": steps_log,
+                    "step_count": step, "stopped": True,
+                }
+            output = await _execute_tool_call(pid, tc)
+            results.append(output)
+            step_info = {"tool": tc.name, "arguments": tc.arguments, "output": output[:2000]}
+            steps_log.append(step_info)
+            if on_step:
+                await on_step(step_info)
+
+        conversation = append_tool_results(provider, conversation, turn.tool_calls, results)
+
+    return {
+        "final_text": "Am atins limita de pasi pentru acest task (25). "
+                       "Rezultatul de pana acum a fost salvat — poti continua conversatia.",
+        "steps": steps_log, "step_count": MAX_AGENT_STEPS,
+    }
 
 
 AVAILABLE_MODELS = [
@@ -679,7 +795,6 @@ SENIOR_ENGINEER_PREFIX = (
     "Be skeptical, precise, evidence-based, and practical. "
     "Find real problems, explain their consequences, and avoid noise."
 )
-
 AGENT_DEFS = [
     {
         "key": "bruteforce",
@@ -1429,7 +1544,7 @@ AGENT_DEFS = [
             "Do not report personal preferences as usability problems.\n\n"
             "15. PRIORITIZATION\n"
             "Use severity consistently:\n"
-            "- high: a normal user can become blocked, lose important progress/data, or cannot complete a core task;\n"
+"- high: a normal user can become blocked, lose important progress/data, or cannot complete a core task;\n"
             "- medium: a meaningful task becomes confusing, error-prone, or unnecessarily difficult;\n"
             "- low: a minor usability issue that causes limited confusion or friction.\n\n"
             "16. SECOND USER PASS\n"
@@ -2214,6 +2329,11 @@ class ChatIn(BaseModel):
     model: Optional[str] = None
 
 
+class AgentChatIn(BaseModel):
+    message: str
+    model: Optional[str] = None
+
+
 class ReviewIn(BaseModel):
     model: Optional[str] = None
 
@@ -2225,8 +2345,6 @@ class NoteIn(BaseModel):
 
 class CalcIn(BaseModel):
     expression: str
-
-
 class SearchIn(BaseModel):
     query: str
 
@@ -2373,11 +2491,13 @@ async def get_messages(pid: str):
 
 @api_router.post("/projects/{pid}/stop")
 async def stop_project_work(pid: str, kind: str = "both"):
-    """kind: 'chat' | 'review' | 'both'"""
+    """kind: 'chat' | 'review' | 'agent' | 'both' (both = chat+review+agent)"""
     if kind in ("chat", "both"):
         request_stop(pid, "chat")
     if kind in ("review", "both"):
         request_stop(pid, "review")
+    if kind in ("agent", "both"):
+        request_stop(pid, "agent")
     return {"ok": True, "stopped": kind}
 
 
@@ -2470,6 +2590,100 @@ async def project_chat(pid: str, body: ChatIn, background_tasks: BackgroundTasks
     return {"reply": reply, "files": new_files, "all_files": merged,
             "message": clean(ai_msg), "auto_review_job_id": auto_job_id, "stopped": False,
             "needs_clarification": False}
+
+
+# ---------------- Agentic chat: model can run commands / write files / read files ----------------
+AGENT_JOBS: dict = {}
+
+AGENT_BUILDER_SYSTEM = BUILDER_SYSTEM + (
+    "\n\n15. TOOLS AVAILABLE\n"
+    "You have real tools: run_command (execute shell commands in an isolated Linux "
+    "sandbox with Node.js pre-installed), write_files, read_file, list_files. "
+    "Use them: write the files you plan to create, then actually run installs/tests/"
+    "builds to verify your code works before declaring it done. Do not just describe "
+    "what you would do — do it, observe the real output, and fix real errors you see. "
+    "Keep your final text response concise: a short summary of what you built and "
+    "verified, not a repeat of the file contents (those are already saved)."
+)
+
+
+def _new_agent_job(job_id, pid):
+    return {
+        "job_id": job_id, "project_id": pid, "done": False, "error": None,
+        "final_text": None, "steps": [], "step_count": 0,
+    }
+
+
+async def _run_agent_job(job_id: str, pid: str, message: str, model: Optional[str]):
+    job = AGENT_JOBS[job_id]
+    try:
+        project = await db.projects.find_one({"id": pid})
+        if not project:
+            job["error"] = "Proiect inexistent"
+            job["done"] = True
+            return
+
+        # Seed the sandbox with whatever files already exist for this project
+        # so the agent starts from the real current state, not empty.
+        existing_files = project.get("files", [])
+        if existing_files:
+            await sandbox_manager.write_files(pid, existing_files)
+
+        model = model or GEMINI_MODEL
+
+        async def on_step(step_info):
+            job["steps"].append(step_info)
+            job["step_count"] = len(job["steps"])
+
+        result = await run_agentic_builder(
+            pid, model, AGENT_BUILDER_SYSTEM, message, on_step=on_step
+        )
+
+        # Note: file state is already synced to Mongo live, on every
+        # write_files tool call (see _execute_tool_call), so no extra
+        # sync step is needed here even if the job was interrupted mid-way.
+        job["final_text"] = result["final_text"]
+        job["step_count"] = result["step_count"]
+
+        ai_msg = {
+            "id": str(uuid.uuid4()), "project_id": pid, "role": "assistant",
+            "content": result["final_text"], "created_at": now_iso(), "msg_type": "normal",
+        }
+        await db.messages.insert_one(dict(ai_msg))
+        job["message"] = clean(ai_msg)
+        job["done"] = True
+    except HTTPException as e:
+        job["error"] = str(e.detail)
+        job["done"] = True
+    except Exception as e:
+        logger.error(f"agent job error: {e}")
+        job["error"] = str(e)
+        job["done"] = True
+
+
+@api_router.post("/projects/{pid}/agent-chat")
+async def start_agent_chat(pid: str, body: AgentChatIn, background_tasks: BackgroundTasks):
+    project = await db.projects.find_one({"id": pid})
+    if not project:
+        raise HTTPException(404, "Proiect inexistent")
+    clear_stop(pid, "agent")
+    ts = now_iso()
+    user_msg = {"id": str(uuid.uuid4()), "project_id": pid, "role": "user",
+                "content": body.message, "created_at": ts, "msg_type": "normal"}
+    await db.messages.insert_one(dict(user_msg))
+
+    job_id = str(uuid.uuid4())
+    AGENT_JOBS[job_id] = _new_agent_job(job_id, pid)
+    background_tasks.add_task(_run_agent_job, job_id, pid, body.message, body.model)
+    return {"job_id": job_id}
+
+
+@api_router.get("/agent-chat/{job_id}")
+async def agent_chat_status(job_id: str):
+    job = AGENT_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(404, "Job inexistent")
+    return job
 
 
 # ---------------- Chat as background job (survives the app being closed) ----------------
@@ -2956,6 +3170,11 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+async def startup_sandbox_reaper():
+    await sandbox_manager.start()
+
+
 @app.on_event("shutdown")
 async def shutdown_db_client():
-    client.close()
+    client.close() 
