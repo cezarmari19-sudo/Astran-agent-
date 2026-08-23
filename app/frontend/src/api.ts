@@ -79,6 +79,12 @@ export const api = {
       body: JSON.stringify({ message, model }),
     }),
   chatStatus: (jobId: string) => req(`/chat/${jobId}`),
+  agentChatStart: (id: string, message: string, model?: string) =>
+    req(`/projects/${id}/agent-chat`, {
+      method: "POST",
+      body: JSON.stringify({ message, model }),
+    }),
+  agentChatStatus: (jobId: string) => req(`/agent-chat/${jobId}`),
   getModels: () => req("/models"),
   review: (id: string, model?: string) =>
     req(`/projects/${id}/review`, { method: "POST", body: JSON.stringify({ model }) }),
