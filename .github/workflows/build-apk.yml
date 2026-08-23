@@ -42,18 +42,18 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: Build debug APK with Gradle
+      - name: Build release APK with Gradle
         working-directory: app/frontend/android
         run: |
           chmod +x ./gradlew
-          ./gradlew assembleDebug --no-daemon
+          ./gradlew assembleRelease --no-daemon
 
       - name: Locate APK
         working-directory: app/frontend
         run: |
-          APK_PATH=$(find android/app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          APK_PATH=$(find android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
           if [ -z "$APK_PATH" ]; then
-            echo "No APK found under android/app/build/outputs/apk/debug"
+            echo "No APK found under android/app/build/outputs/apk/release"
             exit 1
           fi
           echo "Found APK: $APK_PATH"
