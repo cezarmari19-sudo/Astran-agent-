@@ -3,6 +3,9 @@ name: Build APK (manual)
 on:
   workflow_dispatch:
 
+env:
+  EXPO_PUBLIC_BACKEND_URL: https://astran-agent.onrender.com
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -15,33 +18,46 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
       - name: Install dependencies
         working-directory: app/frontend
-        run: yarn install
+        run: yarn install --frozen-lockfile
 
-      - name: Set up EAS CLI
-        uses: expo/expo-github-action@v8
+      - name: Prebuild native Android project
+        working-directory: app/frontend
+        run: npx expo prebuild --platform android --no-install --clean
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
         with:
-          eas-version: latest
-          token: ${{ secrets.EXPO_TOKEN }}
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('app/frontend/android/**/*.gradle*', 'app/frontend/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
 
-      - name: Initialize EAS project (if not already configured)
-        working-directory: app/frontend
-        run: eas init --account cezarmari19-sufo --non-interactive --force
+      - name: Build debug APK with Gradle
+        working-directory: app/frontend/android
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleDebug --no-daemon
 
-      - name: Build APK via EAS and wait for completion
-        working-directory: app/frontend
-        run: eas build --platform android --profile preview --non-interactive --wait --json > build-result.json
-
-      - name: Extract APK download URL
+      - name: Locate APK
         working-directory: app/frontend
         run: |
-          APK_URL=$(node -e "const r = require('./build-result.json'); console.log(Array.isArray(r) ? r[0].artifacts.buildUrl : r.artifacts.buildUrl)")
-          echo "APK_URL=$APK_URL" >> $GITHUB_ENV
-
-      - name: Download APK
-        working-directory: app/frontend
-        run: curl -L -o app-release.apk "$APK_URL"
+          APK_PATH=$(find android/app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "No APK found under android/app/build/outputs/apk/debug"
+            exit 1
+          fi
+          echo "Found APK: $APK_PATH"
+          cp "$APK_PATH" app-release.apk
 
       - name: Upload APK as artifact
         uses: actions/upload-artifact@v4
