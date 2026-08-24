@@ -1,17 +1,21 @@
 import React, { useEffect, useState } from "react";
 import { View, Text, StyleSheet, ScrollView, TextInput } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { useRouter } from "expo-router";
 import { colors, radius, space } from "@/src/theme";
 import { Header, PrimaryButton, useToast } from "@/src/components";
-import { api } from "@/src/api";
+import { api, AuthUser } from "@/src/api";
 import { storage } from "@/src/utils/storage";
 
 export default function SettingsScreen() {
   const { show, Toast } = useToast();
+  const router = useRouter();
   const [token, setToken] = useState("");
   const [checking, setChecking] = useState(false);
   const [ghInfo, setGhInfo] = useState<{ login: string; count: number } | null>(null);
   const [health, setHealth] = useState<any>(null);
+  const [me, setMe] = useState<AuthUser | null>(null);
+  const [loggingOut, setLoggingOut] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -19,8 +23,21 @@ export default function SettingsScreen() {
       try {
         setHealth(await api.health());
       } catch {}
+      try {
+        setMe(await api.me());
+      } catch {}
     })();
   }, []);
+
+  const logout = async () => {
+    setLoggingOut(true);
+    try {
+      await api.logout();
+      router.replace("/auth");
+    } finally {
+      setLoggingOut(false);
+    }
+  };
 
   const verify = async () => {
     if (!token.trim()) return show("Adaugă un token", "err");
@@ -42,6 +59,25 @@ export default function SettingsScreen() {
     <View style={styles.container}>
       <Header title="Setări" subtitle="Cont GitHub, securitate & status" />
       <ScrollView contentContainerStyle={{ padding: space.md, paddingBottom: 120 }}>
+        <View style={styles.section}>
+          <View style={styles.rowHead}>
+            <Ionicons name="person-circle" size={20} color={colors.text} />
+            <Text style={styles.sectionTitle}>Cont</Text>
+          </View>
+          {me && (
+            <Text style={styles.help}>
+              Autentificat ca {me.email}
+            </Text>
+          )}
+          <PrimaryButton
+            testID="logout-btn"
+            title="Deconectare"
+            icon="log-out"
+            loading={loggingOut}
+            onPress={logout}
+          />
+        </View>
+
         <View style={styles.section}>
           <View style={styles.rowHead}>
             <Ionicons name="logo-github" size={20} color={colors.text} />
