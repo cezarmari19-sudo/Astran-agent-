@@ -49,11 +49,15 @@ export default function ProjectScreen() {
   const [clarifyStep, setClarifyStep] = useState(0);
   const [clarifyAnswers, setClarifyAnswers] = useState<string[]>([]);
   const [autoReviewJob, setAutoReviewJob] = useState<any>(null);
+  const [agentMode, setAgentMode] = useState(false);
+  const [agentSteps, setAgentSteps] = useState<any[]>([]);
+  const agentPollRef = useRef<any>(null);
   const autoReviewPollRef = useRef<any>(null);
   const chatPollRef = useRef<any>(null);
   const scrollRef = useRef<ScrollView>(null);
   const chatJobKey = `chat_job_${id}`;
   const reviewJobKey = `review_job_${id}`;
+  const agentJobKey = `agent_job_${id}`;
 
   const trackAutoReview = (jobId: string, skipSave?: boolean) => {
     if (autoReviewPollRef.current) clearInterval(autoReviewPollRef.current);
@@ -110,6 +114,55 @@ export default function ProjectScreen() {
     }, 2000);
   };
 
+  const finishAgentJob = async (job: any) => {
+    if (agentPollRef.current) clearInterval(agentPollRef.current);
+    setSending(false);
+    setAgentSteps([]);
+    await storage.removeItem(agentJobKey);
+    if (job.error) {
+      show(job.error, "err");
+    }
+    // job.message (the final assistant reply) and any files the agent wrote
+    // were already persisted by the backend as the tool calls ran — just
+    // reload from the server to pick up messages + files.
+    load();
+    setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 60);
+  };
+
+  const trackAgentJob = (jobId: string) => {
+    if (agentPollRef.current) clearInterval(agentPollRef.current);
+    agentPollRef.current = setInterval(async () => {
+      try {
+        const job = await api.agentChatStatus(jobId);
+        setAgentSteps(job.steps || []);
+        if (job.done) await finishAgentJob(job);
+      } catch {
+        /* keep polling */
+      }
+    }, 2000);
+  };
+
+  useEffect(() => {
+    (async () => {
+      const savedAgentJobId = await storage.getItem(agentJobKey, "");
+      if (savedAgentJobId) {
+        setSending(true);
+        try {
+          const job = await api.agentChatStatus(savedAgentJobId as string);
+          setAgentSteps(job.steps || []);
+          if (job.done) {
+            await finishAgentJob(job);
+          } else {
+            trackAgentJob(savedAgentJobId as string);
+          }
+        } catch {
+          await storage.removeItem(agentJobKey);
+          setSending(false);
+        }
+      }
+    })();
+  }, []);
+
   useEffect(() => {
     (async () => {
       const savedJobId = await storage.getItem(chatJobKey, "");
@@ -155,6 +208,7 @@ export default function ProjectScreen() {
     return () => {
       if (autoReviewPollRef.current) clearInterval(autoReviewPollRef.current);
       if (chatPollRef.current) clearInterval(chatPollRef.current);
+      if (agentPollRef.current) clearInterval(agentPollRef.current);
     };
   }, []);
 
@@ -214,9 +268,16 @@ export default function ProjectScreen() {
     setSending(true);
     setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
     try {
-      const { job_id } = await api.chatStart(id!, text, model);
-      await storage.setItem(chatJobKey, job_id);
-      trackChatJob(job_id);
+      if (agentMode) {
+        setAgentSteps([]);
+        const { job_id } = await api.agentChatStart(id!, text, model);
+        await storage.setItem(agentJobKey, job_id);
+        trackAgentJob(job_id);
+      } else {
+        const { job_id } = await api.chatStart(id!, text, model);
+        await storage.setItem(chatJobKey, job_id);
+        trackChatJob(job_id);
+      }
     } catch (e: any) {
       setMessages((m) => m.filter((msg) => msg.id !== optimistic.id));
       setSending(false);
@@ -344,6 +405,9 @@ export default function ProjectScreen() {
           onStop={stopEverything}
           stopping={stopping}
           autoReviewJob={autoReviewJob}
+          agentMode={agentMode}
+          onToggleAgentMode={() => setAgentMode((s: boolean) => !s)}
+          agentSteps={agentSteps}
         />
       )}
       {tab === "files" && (
@@ -415,6 +479,9 @@ function ChatTab({
   onStop,
   stopping,
   autoReviewJob,
+  agentMode,
+  onToggleAgentMode,
+  agentSteps,
 }: any) {
   const lastMsg = messages[messages.length - 1];
   const awaitingClarification = lastMsg && lastMsg.msg_type === "clarify" && !sending;
@@ -422,6 +489,8 @@ function ChatTab({
   const lastPass = reviewInProgress && autoReviewJob.passes?.length
     ? autoReviewJob.passes[autoReviewJob.passes.length - 1]
     : null;
+  const agentRunning = agentMode && sending;
+  const lastAgentStep = agentSteps && agentSteps.length ? agentSteps[agentSteps.length - 1] : null;
 
   return (
     <KeyboardAvoidingView
@@ -577,6 +646,24 @@ function ChatTab({
             </Text>
             <Ionicons name={showModels ? "chevron-down" : "chevron-up"} size={13} color={colors.faint} />
           </Pressable>
+          <Pressable
+            testID="agent-mode-toggle"
+            onPress={onToggleAgentMode}
+            disabled={sending}
+            style={[styles.modelPill, agentMode && { borderColor: colors.accent }]}
+          >
+            <Ionicons
+              name="terminal-outline"
+              size={14}
+              color={agentMode ? colors.accent : colors.faint}
+            />
+            <Text
+              style={[styles.modelPillText, agentMode && { color: colors.accent }]}
+              numberOfLines={1}
+            >
+              Agent {agentMode ? "ON" : "OFF"}
+            </Text>
+          </Pressable>
           {sending && (
             <Pressable testID="stop-btn" onPress={onStop} disabled={stopping} style={styles.stopPill}>
               <Ionicons name="stop-circle" size={14} color={colors.danger} />
@@ -584,6 +671,25 @@ function ChatTab({
             </Pressable>
           )}
         </View>
+        {agentMode && !sending && (
+          <View style={styles.clarifyNudge}>
+            <Ionicons name="terminal-outline" size={14} color={colors.accent} />
+            <Text style={styles.clarifyNudgeText}>
+              Agent mode: Aria va scrie fișiere și va rula comenzi reale (npm install, teste) într-un sandbox izolat, ca să verifice că totul funcționează.
+            </Text>
+          </View>
+        )}
+        {agentRunning && (
+          <View style={styles.clarifyNudge}>
+            <Ionicons name="sync-outline" size={14} color={colors.accent2} />
+            <Text style={styles.clarifyNudgeText}>
+              {lastAgentStep
+                ? `${lastAgentStep.tool}: ${lastAgentStep.output?.slice(0, 80) || "…"}`
+                : "Aria lucrează…"}{" "}
+              ({agentSteps?.length || 0} pași)
+            </Text>
+          </View>
+        )}
         {awaitingClarification && (
           <View style={styles.clarifyNudge}>
             <Ionicons name="help-circle-outline" size={14} color={colors.accent2} />
@@ -641,7 +747,7 @@ function FilesTab({ files, inspirationFiles, projectId, show, onFilesChanged }: 
   };
 
   const doUploadProject = async (uri: string, name: string) => {
-    setUploadingProject(true);
+setUploadingProject(true);
     try {
       const res = await api.uploadProjectZip(projectId, uri, name, "replace");
       show(`${res.files_count} fișiere încărcate din ZIP`);
@@ -1127,7 +1233,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 6,
     marginBottom: 2,
-marginBottom: 2,
   },
   clarifyNudgeText: { color: colors.accent2, fontSize: 11, fontWeight: "600" },
   autoReviewCard: {
