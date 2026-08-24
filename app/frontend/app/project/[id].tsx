@@ -747,7 +747,7 @@ function FilesTab({ files, inspirationFiles, projectId, show, onFilesChanged }: 
   };
 
   const doUploadProject = async (uri: string, name: string) => {
-setUploadingProject(true);
+    setUploadingProject(true);
     try {
       const res = await api.uploadProjectZip(projectId, uri, name, "replace");
       show(`${res.files_count} fișiere încărcate din ZIP`);
@@ -1233,6 +1233,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 6,
     marginBottom: 2,
+marginBottom: 2,
   },
   clarifyNudgeText: { color: colors.accent2, fontSize: 11, fontWeight: "600" },
   autoReviewCard: {
