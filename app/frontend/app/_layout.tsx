@@ -1,4 +1,4 @@
-import { Stack } from "expo-router";
+import { Stack, useRouter } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect } from "react";
 import { LogBox } from "react-native";
@@ -7,6 +7,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 
 import { useIconFonts } from "@/src/hooks/use-icon-fonts";
+import { onSessionExpired } from "@/src/api";
 
 // Disable logbox errors etc so that users can see the app
 // and agent works as expected.
@@ -20,12 +21,22 @@ SplashScreen.preventAutoHideAsync();
 
 export default function RootLayout() {
   const [loaded, error] = useIconFonts();
+  const router = useRouter();
 
   useEffect(() => {
     if (loaded || error) {
       SplashScreen.hideAsync();
     }
   }, [loaded, error]);
+
+  // Any request anywhere in the app that comes back 401 (expired,
+  // revoked, or IP-banned session) bounces the user straight to the
+  // login screen instead of leaving them stuck on a broken data view.
+  useEffect(() => {
+    onSessionExpired(() => {
+      router.replace("/auth");
+    });
+  }, [router]);
 
   // If the CDN is unreachable we fall through on error rather than wedging
   // the app — icons will tofu, but the app still boots.
