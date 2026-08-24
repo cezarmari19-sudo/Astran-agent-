@@ -1,9 +1,61 @@
+import "react-native-get-random-values";
+import { v4 as uuidv4 } from "uuid";
+import { storage } from "@/src/utils/storage";
+
 const BASE = process.env.EXPO_PUBLIC_BACKEND_URL;
 export const API = `${BASE}/api`;
 
+const TOKEN_KEY = "auth_token";
+const DEVICE_ID_KEY = "device_id";
+
+// In-memory cache so every request doesn't hit secure storage; refreshed
+// on login/logout and read once at cold start via ensureDeviceId().
+let cachedToken: string | null = null;
+let sessionExpiredHandler: (() => void) | null = null;
+
+/** Call once near app startup (e.g. in the auth gate) to be notified when
+ * any request comes back 401 — used to bounce the user to the login screen
+ * without every screen needing its own try/catch for it. */
+export function onSessionExpired(handler: () => void) {
+  sessionExpiredHandler = handler;
+}
+
+export async function getToken(): Promise<string | null> {
+  if (cachedToken !== null) return cachedToken;
+  const stored = await storage.secureGet(TOKEN_KEY, "");
+  cachedToken = (stored as string) || null;
+  return cachedToken;
+}
+
+async function setToken(token: string | null) {
+  cachedToken = token;
+  if (token) {
+    await storage.secureSet(TOKEN_KEY, token);
+  } else {
+    await storage.removeItem(TOKEN_KEY);
+  }
+}
+
+/** A stable per-install identifier, persisted so the backend's per-device
+ * login rate limit (5 attempts / 24h) applies consistently across app
+ * restarts rather than resetting every launch. */
+export async function getDeviceId(): Promise<string> {
+  const existing = await storage.getItem(DEVICE_ID_KEY, "");
+  if (existing) return existing as string;
+  const fresh = uuidv4();
+  await storage.setItem(DEVICE_ID_KEY, fresh);
+  return fresh;
+}
+
+async function authHeaders(): Promise<Record<string, string>> {
+  const token = await getToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 async function req(path: string, opts: RequestInit = {}) {
+  const auth = await authHeaders();
   const res = await fetch(`${API}${path}`, {
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...auth },
     ...opts,
   });
   const text = await res.text();
@@ -13,6 +65,10 @@ async function req(path: string, opts: RequestInit = {}) {
   } catch {
     data = text;
   }
+  if (res.status === 401) {
+    await setToken(null);
+    if (sessionExpiredHandler) sessionExpiredHandler();
+  }
   if (!res.ok) {
     const msg = (data && (data.detail || data.message)) || `Eroare ${res.status}`;
     throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
@@ -21,6 +77,7 @@ async function req(path: string, opts: RequestInit = {}) {
 }
 
 async function uploadZip(path: string, fileUri: string, fileName: string, extraFields?: Record<string, string>) {
+  const auth = await authHeaders();
   const form = new FormData();
   form.append("file", {
     uri: fileUri,
@@ -32,6 +89,7 @@ async function uploadZip(path: string, fileUri: string, fileName: string, extraF
   }
   const res = await fetch(`${API}${path}`, {
     method: "POST",
+    headers: { ...auth },
     body: form as any,
   });
   const text = await res.text();
@@ -40,6 +98,10 @@ async function uploadZip(path: string, fileUri: string, fileName: string, extraF
     data = text ? JSON.parse(text) : null;
   } catch {
     data = text;
+  }
+  if (res.status === 401) {
+    await setToken(null);
+    if (sessionExpiredHandler) sessionExpiredHandler();
   }
   if (!res.ok) {
     const msg = (data && (data.detail || data.message)) || `Eroare ${res.status}`;
@@ -58,9 +120,38 @@ export type Project = {
   created_at: string;
   updated_at: string;
 };
+export type AuthUser = { id: string; email: string };
 
 export const api = {
   health: () => req("/health"),
+
+  // ---------------- Auth ----------------
+  register: async (email: string, password: string): Promise<{ token: string; user: AuthUser }> => {
+    const device_id = await getDeviceId();
+    const result = await req("/auth/register", {
+      method: "POST",
+      body: JSON.stringify({ email, password, device_id }),
+    });
+    await setToken(result.token);
+    return result;
+  },
+  login: async (email: string, password: string): Promise<{ token: string; user: AuthUser }> => {
+    const device_id = await getDeviceId();
+    const result = await req("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email, password, device_id }),
+    });
+    await setToken(result.token);
+    return result;
+  },
+  logout: async () => {
+    await setToken(null);
+  },
+  me: (): Promise<AuthUser> => req("/auth/me"),
+  isLoggedIn: async (): Promise<boolean> => {
+    const token = await getToken();
+    return !!token;
+  },
 
   listProjects: (): Promise<Project[]> => req("/projects"),
   createProject: (name: string, description: string): Promise<Project> =>
