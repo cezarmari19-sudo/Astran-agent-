@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks, File, UploadFile, Form
+from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks, File, UploadFile, Form, Header, Depends, Request
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -29,6 +29,7 @@ from agent_tools import (
     append_tool_results, ToolCall, MAX_AGENT_STEPS,
 )
 from sandbox import sandbox_manager, SandboxError
+from auth import AuthModule, RegisterIn, LoginIn, get_client_ip
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -36,6 +37,17 @@ load_dotenv(ROOT_DIR / '.env')
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
+
+auth_module = AuthModule(db)
+
+
+async def get_current_user(request: Request, authorization: Optional[str] = Header(None)) -> dict:
+    """FastAPI dependency: protects any route that includes it. Reads the
+    'Authorization: Bearer <token>' header, validates the session, records
+    the calling IP against it (for compromise/anomaly detection), and
+    returns {'id': ..., 'email': ...} for the calling user."""
+    ip = get_client_ip(request)
+    return await auth_module.get_current_user(authorization, ip)
 
 
 def _parse_key_list(env_value: str) -> list:
@@ -100,6 +112,9 @@ def request_stop(pid: str, kind: str):
 
 # ---------------- LLM: direct calls to official SDKs, with per-provider key rotation ----------------
 _key_cursor = {"gemini": 0, "anthropic": 0, "openai": 0}
+_key_cursor_locks = {
+    "gemini": asyncio.Lock(), "anthropic": asyncio.Lock(), "openai": asyncio.Lock(),
+}
 
 RETRY_BETWEEN_KEYS_SECONDS = 10          # gap between trying key N and key N+1 in NORMAL use
 RECOVERY_CHECK_INTERVAL_SECONDS = 10 * 60  # re-sweep ALL keys every 10 minutes when exhausted
@@ -188,7 +203,7 @@ async def _recovery_loop(provider: str, model: str):
             working_key = await _sweep_all_keys_once(provider, model)
             if working_key:
                 keys = _KEYS_BY_PROVIDER[provider]
-                _key_cursor[provider] = keys.index(working_key)
+                await _set_key_cursor(provider, keys.index(working_key))
                 state["exhausted"] = False
                 break
             if time.monotonic() - started >= RECOVERY_MAX_SECONDS:
@@ -222,6 +237,16 @@ async def _wait_for_recovery(provider: str, model: str):
         )
 
 
+async def _get_start_index(provider: str, num_keys: int) -> int:
+    async with _key_cursor_locks[provider]:
+        return _key_cursor[provider] % num_keys
+
+
+async def _set_key_cursor(provider: str, idx: int):
+    async with _key_cursor_locks[provider]:
+        _key_cursor[provider] = idx
+
+
 async def _call_with_key_rotation(provider: str, model: str, system_message: str, prompt: str) -> str:
     keys = _KEYS_BY_PROVIDER[provider]
     call_fn = _CALL_FN[provider]
@@ -233,7 +258,10 @@ async def _call_with_key_rotation(provider: str, model: str, system_message: str
     if state["exhausted"] or state["recovery_task"] is not None:
         await _wait_for_recovery(provider, model)
 
-    start = _key_cursor[provider] % len(keys)
+    # Snapshot the cursor under the lock, but release it before making any
+    # network calls — key rotation state should stay consistent between
+    # concurrent requests without serializing the actual LLM calls.
+    start = await _get_start_index(provider, len(keys))
     last_err = None
     for offset in range(len(keys)):
         idx = (start + offset) % len(keys)
@@ -241,7 +269,7 @@ async def _call_with_key_rotation(provider: str, model: str, system_message: str
         try:
             result = await call_fn(key, model, system_message, prompt)
             if result:
-                _key_cursor[provider] = idx
+                await _set_key_cursor(provider, idx)
                 return result
         except Exception as e:
             last_err = e
@@ -252,7 +280,7 @@ async def _call_with_key_rotation(provider: str, model: str, system_message: str
 
     state["exhausted"] = True
     await _wait_for_recovery(provider, model)
-    working_idx = _key_cursor[provider]
+    working_idx = await _get_start_index(provider, len(keys))
     return await call_fn(keys[working_idx], model, system_message, prompt)
 
 
@@ -335,7 +363,7 @@ async def run_agentic_builder(pid: str, model: str, system_message: str, user_me
     keys = _KEYS_BY_PROVIDER[provider]
     if not keys:
         raise HTTPException(400, f"Nicio cheie configurata pentru providerul {provider}")
-    api_key = keys[_key_cursor[provider] % len(keys)]
+    api_key = keys[await _get_start_index(provider, len(keys))]
 
     conversation = new_conversation(provider, user_message)
     steps_log = []
@@ -795,6 +823,7 @@ SENIOR_ENGINEER_PREFIX = (
     "Be skeptical, precise, evidence-based, and practical. "
     "Find real problems, explain their consequences, and avoid noise."
 )
+
 AGENT_DEFS = [
     {
         "key": "bruteforce",
@@ -1544,7 +1573,7 @@ AGENT_DEFS = [
             "Do not report personal preferences as usability problems.\n\n"
             "15. PRIORITIZATION\n"
             "Use severity consistently:\n"
-"- high: a normal user can become blocked, lose important progress/data, or cannot complete a core task;\n"
+            "- high: a normal user can become blocked, lose important progress/data, or cannot complete a core task;\n"
             "- medium: a meaningful task becomes confusing, error-prone, or unnecessarily difficult;\n"
             "- low: a minor usability issue that causes limited confusion or friction.\n\n"
             "16. SECOND USER PASS\n"
@@ -2345,6 +2374,8 @@ class NoteIn(BaseModel):
 
 class CalcIn(BaseModel):
     expression: str
+
+
 class SearchIn(BaseModel):
     query: str
 
@@ -2373,6 +2404,24 @@ async def health():
     return {"status": "ok", "ai_key_configured": bool(GEMINI_API_KEYS or ANTHROPIC_API_KEYS or OPENAI_API_KEYS)}
 
 
+# ---------------- Auth ----------------
+@api_router.post("/auth/register")
+async def register(body: RegisterIn, request: Request):
+    ip = get_client_ip(request)
+    return await auth_module.register(body, ip)
+
+
+@api_router.post("/auth/login")
+async def login(body: LoginIn, request: Request):
+    ip = get_client_ip(request)
+    return await auth_module.login(body, ip)
+
+
+@api_router.get("/auth/me")
+async def get_me(user: dict = Depends(get_current_user)):
+    return user
+
+
 @api_router.get("/models")
 async def list_models():
     return {
@@ -2393,9 +2442,10 @@ async def list_models():
 
 # Projects
 @api_router.post("/projects")
-async def create_project(body: ProjectCreate):
+async def create_project(body: ProjectCreate, user: dict = Depends(get_current_user)):
     proj = {
         "id": str(uuid.uuid4()),
+        "owner_id": user["id"],
         "name": body.name,
         "description": body.description or "",
         "files": [],
@@ -2408,21 +2458,30 @@ async def create_project(body: ProjectCreate):
 
 
 @api_router.get("/projects")
-async def list_projects():
-    docs = await db.projects.find().sort("updated_at", -1).to_list(200)
+async def list_projects(user: dict = Depends(get_current_user)):
+    docs = await db.projects.find({"owner_id": user["id"]}).sort("updated_at", -1).to_list(200)
     return [clean(d) for d in docs]
 
 
-@api_router.get("/projects/{pid}")
-async def get_project(pid: str):
-    doc = await db.projects.find_one({"id": pid})
+async def _get_owned_project_or_404(pid: str, user: dict) -> dict:
+    """Fetch a project and verify the current user owns it. Used by every
+    route below instead of a bare find_one, so a project ID cannot be used
+    to read/modify/delete another user's data."""
+    doc = await db.projects.find_one({"id": pid, "owner_id": user["id"]})
     if not doc:
         raise HTTPException(404, "Proiect inexistent")
+    return doc
+
+
+@api_router.get("/projects/{pid}")
+async def get_project(pid: str, user: dict = Depends(get_current_user)):
+    doc = await _get_owned_project_or_404(pid, user)
     return clean(doc)
 
 
 @api_router.delete("/projects/{pid}")
-async def delete_project(pid: str):
+async def delete_project(pid: str, user: dict = Depends(get_current_user)):
+    await _get_owned_project_or_404(pid, user)
     await db.projects.delete_one({"id": pid})
     await db.messages.delete_many({"project_id": pid})
     STOP_FLAGS.pop(pid, None)
@@ -2430,12 +2489,11 @@ async def delete_project(pid: str):
 
 
 @api_router.post("/projects/{pid}/upload-zip")
-async def upload_project_zip(pid: str, file: UploadFile = File(...), mode: str = Form("replace")):
+async def upload_project_zip(pid: str, file: UploadFile = File(...), mode: str = Form("replace"),
+                             user: dict = Depends(get_current_user)):
     """Upload a ZIP of the user's own project. mode='replace' overwrites the editable
     files (Set 2) with the ZIP contents, so Aria can edit/extend it directly."""
-    project = await db.projects.find_one({"id": pid})
-    if not project:
-        raise HTTPException(404, "Proiect inexistent")
+    project = await _get_owned_project_or_404(pid, user)
 
     zip_bytes = await file.read()
     extracted = extract_zip_files(zip_bytes)
@@ -2460,12 +2518,10 @@ async def upload_project_zip(pid: str, file: UploadFile = File(...), mode: str =
 
 
 @api_router.post("/projects/{pid}/upload-inspiration")
-async def upload_inspiration_zip(pid: str, file: UploadFile = File(...)):
+async def upload_inspiration_zip(pid: str, file: UploadFile = File(...), user: dict = Depends(get_current_user)):
     """Upload a ZIP as read-only inspiration/reference — Aria can see it for context
     but never edits it, and it's never committed to GitHub."""
-    project = await db.projects.find_one({"id": pid})
-    if not project:
-        raise HTTPException(404, "Proiect inexistent")
+    project = await _get_owned_project_or_404(pid, user)
 
     zip_bytes = await file.read()
     extracted = extract_zip_files(zip_bytes)
@@ -2478,20 +2534,23 @@ async def upload_inspiration_zip(pid: str, file: UploadFile = File(...)):
 
 
 @api_router.delete("/projects/{pid}/inspiration")
-async def clear_inspiration(pid: str):
+async def clear_inspiration(pid: str, user: dict = Depends(get_current_user)):
+    await _get_owned_project_or_404(pid, user)
     await db.projects.update_one({"id": pid}, {"$set": {"inspiration_files": []}})
     return {"ok": True}
 
 
 @api_router.get("/projects/{pid}/messages")
-async def get_messages(pid: str):
+async def get_messages(pid: str, user: dict = Depends(get_current_user)):
+    await _get_owned_project_or_404(pid, user)
     docs = await db.messages.find({"project_id": pid}).sort("created_at", 1).to_list(1000)
     return [clean(d) for d in docs]
 
 
 @api_router.post("/projects/{pid}/stop")
-async def stop_project_work(pid: str, kind: str = "both"):
+async def stop_project_work(pid: str, kind: str = "both", user: dict = Depends(get_current_user)):
     """kind: 'chat' | 'review' | 'agent' | 'both' (both = chat+review+agent)"""
+    await _get_owned_project_or_404(pid, user)
     if kind in ("chat", "both"):
         request_stop(pid, "chat")
     if kind in ("review", "both"):
@@ -2502,10 +2561,8 @@ async def stop_project_work(pid: str, kind: str = "both"):
 
 
 @api_router.post("/projects/{pid}/chat")
-async def project_chat(pid: str, body: ChatIn, background_tasks: BackgroundTasks):
-    project = await db.projects.find_one({"id": pid})
-    if not project:
-        raise HTTPException(404, "Proiect inexistent")
+async def project_chat(pid: str, body: ChatIn, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
+    project = await _get_owned_project_or_404(pid, user)
 
     clear_stop(pid, "chat")
 
@@ -2662,10 +2719,8 @@ async def _run_agent_job(job_id: str, pid: str, message: str, model: Optional[st
 
 
 @api_router.post("/projects/{pid}/agent-chat")
-async def start_agent_chat(pid: str, body: AgentChatIn, background_tasks: BackgroundTasks):
-    project = await db.projects.find_one({"id": pid})
-    if not project:
-        raise HTTPException(404, "Proiect inexistent")
+async def start_agent_chat(pid: str, body: AgentChatIn, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
+    project = await _get_owned_project_or_404(pid, user)
     clear_stop(pid, "agent")
     ts = now_iso()
     user_msg = {"id": str(uuid.uuid4()), "project_id": pid, "role": "user",
@@ -2674,14 +2729,15 @@ async def start_agent_chat(pid: str, body: AgentChatIn, background_tasks: Backgr
 
     job_id = str(uuid.uuid4())
     AGENT_JOBS[job_id] = _new_agent_job(job_id, pid)
+    AGENT_JOBS[job_id]["owner_id"] = user["id"]
     background_tasks.add_task(_run_agent_job, job_id, pid, body.message, body.model)
     return {"job_id": job_id}
 
 
 @api_router.get("/agent-chat/{job_id}")
-async def agent_chat_status(job_id: str):
+async def agent_chat_status(job_id: str, user: dict = Depends(get_current_user)):
     job = AGENT_JOBS.get(job_id)
-    if not job:
+    if not job or job.get("owner_id") != user["id"]:
         raise HTTPException(404, "Job inexistent")
     return job
 
@@ -2806,20 +2862,19 @@ async def _run_chat_job(job_id: str, pid: str, message: str, model: Optional[str
 
 
 @api_router.post("/projects/{pid}/chat/start")
-async def start_chat_job(pid: str, body: ChatIn, background_tasks: BackgroundTasks):
-    project = await db.projects.find_one({"id": pid})
-    if not project:
-        raise HTTPException(404, "Proiect inexistent")
+async def start_chat_job(pid: str, body: ChatIn, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
+    project = await _get_owned_project_or_404(pid, user)
     job_id = str(uuid.uuid4())
     CHAT_JOBS[job_id] = _new_chat_job(job_id, pid)
+    CHAT_JOBS[job_id]["owner_id"] = user["id"]
     background_tasks.add_task(_run_chat_job, job_id, pid, body.message, body.model)
     return {"job_id": job_id}
 
 
 @api_router.get("/chat/{job_id}")
-async def chat_job_status(job_id: str):
+async def chat_job_status(job_id: str, user: dict = Depends(get_current_user)):
     job = CHAT_JOBS.get(job_id)
-    if not job:
+    if not job or job.get("owner_id") != user["id"]:
         raise HTTPException(404, "Job inexistent")
     return job
 
@@ -2993,45 +3048,44 @@ async def _run_review(job_id, pid, model=None):
 
 
 @api_router.post("/projects/{pid}/review")
-async def start_review(pid: str, body: ReviewIn, background_tasks: BackgroundTasks):
-    project = await db.projects.find_one({"id": pid})
-    if not project:
-        raise HTTPException(404, "Proiect inexistent")
+async def start_review(pid: str, body: ReviewIn, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
+    project = await _get_owned_project_or_404(pid, user)
     if not project.get("files"):
         raise HTTPException(400, "Nu exista cod de verificat. Genereaza intai o aplicatie in chat.")
     clear_stop(pid, "review")
     job_id = str(uuid.uuid4())
     REVIEW_JOBS[job_id] = _new_review_job(job_id, pid)
+    REVIEW_JOBS[job_id]["owner_id"] = user["id"]
     background_tasks.add_task(_run_review, job_id, pid, body.model)
     return {"job_id": job_id}
 
 
 @api_router.get("/review/{job_id}")
-async def review_status(job_id: str):
+async def review_status(job_id: str, user: dict = Depends(get_current_user)):
     job = REVIEW_JOBS.get(job_id)
-    if not job:
+    if not job or job.get("owner_id") != user["id"]:
         raise HTTPException(404, "Job inexistent")
     return job
 
 
 # Notes
 @api_router.post("/notes")
-async def create_note(body: NoteIn):
-    note = {"id": str(uuid.uuid4()), "title": body.title,
+async def create_note(body: NoteIn, user: dict = Depends(get_current_user)):
+    note = {"id": str(uuid.uuid4()), "owner_id": user["id"], "title": body.title,
             "content": body.content or "", "created_at": now_iso()}
     await db.notes.insert_one(dict(note))
     return clean(note)
 
 
 @api_router.get("/notes")
-async def list_notes():
-    docs = await db.notes.find().sort("created_at", -1).to_list(500)
+async def list_notes(user: dict = Depends(get_current_user)):
+    docs = await db.notes.find({"owner_id": user["id"]}).sort("created_at", -1).to_list(500)
     return [clean(d) for d in docs]
 
 
 @api_router.delete("/notes/{nid}")
-async def delete_note(nid: str):
-    await db.notes.delete_one({"id": nid})
+async def delete_note(nid: str, user: dict = Depends(get_current_user)):
+    await db.notes.delete_one({"id": nid, "owner_id": user["id"]})
     return {"ok": True}
 
 
@@ -3054,7 +3108,7 @@ def _eval(node):
 
 
 @api_router.post("/tools/calculator")
-async def calculator(body: CalcIn):
+async def calculator(body: CalcIn, current_user: dict = Depends(get_current_user)):
     try:
         tree = ast.parse(body.expression, mode="eval")
         result = _eval(tree.body)
@@ -3069,7 +3123,7 @@ SEARX_INSTANCES = ["https://searx.be", "https://priv.au",
 
 
 @api_router.post("/tools/websearch")
-async def websearch(body: SearchIn):
+async def websearch(body: SearchIn, current_user: dict = Depends(get_current_user)):
     headers = {"User-Agent": "Mozilla/5.0 (AI-Builder)"}
     for base in SEARX_INSTANCES:
         try:
@@ -3094,7 +3148,7 @@ async def websearch(body: SearchIn):
 
 # GitHub
 @api_router.post("/github/repos")
-async def github_repos(body: GithubReposIn):
+async def github_repos(body: GithubReposIn, current_user: dict = Depends(get_current_user)):
     headers = {"Authorization": f"Bearer {body.token}",
                "Accept": "application/vnd.github+json"}
     r = requests.get("https://api.github.com/user/repos",
@@ -3104,18 +3158,16 @@ async def github_repos(body: GithubReposIn):
         raise HTTPException(400, f"Token GitHub invalid ({r.status_code})")
     repos = [{"full_name": x["full_name"], "private": x["private"],
               "default_branch": x.get("default_branch", "main")} for x in r.json()]
-    user = requests.get("https://api.github.com/user", headers=headers, timeout=15)
-    login = user.json().get("login") if user.status_code == 200 else None
+    gh_user_resp = requests.get("https://api.github.com/user", headers=headers, timeout=15)
+    login = gh_user_resp.json().get("login") if gh_user_resp.status_code == 200 else None
     return {"login": login, "repos": repos}
 
 
 @api_router.post("/github/commit")
-async def github_commit(body: GithubCommitIn):
+async def github_commit(body: GithubCommitIn, current_user: dict = Depends(get_current_user)):
     files = body.files
     if body.project_id and not files:
-        project = await db.projects.find_one({"id": body.project_id})
-        if not project:
-            raise HTTPException(404, "Proiect inexistent")
+        project = await _get_owned_project_or_404(body.project_id, current_user)
         files = project.get("files", [])
     if not files:
         raise HTTPException(400, "Niciun fisier de trimis.")
@@ -3161,10 +3213,25 @@ async def github_commit(body: GithubCommitIn):
 
 app.include_router(api_router)
 
+_cors_origins_env = os.environ.get("CORS_ALLOWED_ORIGINS", "")
+_cors_origins = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
+if not _cors_origins:
+    # No origins configured: fail closed rather than allow "*" with
+    # credentials, which is both a spec violation and a real exposure now
+    # that endpoints hold session cookies/headers and can trigger sandboxed
+    # code execution. Mobile app traffic (Expo/React Native) is not
+    # subject to CORS at all — this setting only matters for browser-based
+    # clients (e.g. an Expo web build or an admin dashboard).
+    logger.warning(
+        "CORS_ALLOWED_ORIGINS nu este setat — niciun origin de browser nu va fi "
+        "permis explicit. Seteaza CORS_ALLOWED_ORIGINS=https://exemplu.com,https://alt-domeniu.com in .env "
+        "daca ai nevoie de acces din browser."
+    )
+
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -3173,8 +3240,9 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_sandbox_reaper():
     await sandbox_manager.start()
+    await auth_module.ensure_indexes()
 
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
-    client.close() 
+    client.close()
