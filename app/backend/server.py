@@ -30,6 +30,8 @@ from agent_tools import (
 )
 from sandbox import sandbox_manager, SandboxError
 from auth import AuthModule, RegisterIn, LoginIn, get_client_ip
+from payments_stripe import STRIPE_PLAYBOOK
+from payments_google_billing import GOOGLE_BILLING_PLAYBOOK
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -553,6 +555,35 @@ BUILDER_SYSTEM = (
     "The goal is to produce software that is coherent, functional, maintainable, visually polished, "
     "and as close as possible to something a competent engineering team would actually ship."
 )
+
+
+# ---------------- Payment integration playbooks ----------------
+# Loaded into the system prompt ONLY when the user explicitly asks for
+# payment integration — never by default, so ordinary requests stay fast
+# and the model isn't carrying payment-specific rules for unrelated tasks.
+# Detection is deliberately keyword-based and conservative: false negatives
+# (missing a request) just mean the user has to ask more explicitly; false
+# positives just mean a bit of extra prompt content, which is harmless.
+_STRIPE_KEYWORDS = [
+    "stripe", "checkout session", "payment intent",
+]
+_GOOGLE_BILLING_KEYWORDS = [
+    "google play billing", "play billing", "in-app purchase", "in app purchase",
+    "iap google", "android billing", "cumparaturi in aplicatie", "cumpărături în aplicație",
+    "achizitii in aplicatie", "achiziții în aplicație",
+]
+
+
+def _detect_payment_playbooks(message: str) -> str:
+    """Returns extra system-prompt text (possibly empty) based on explicit
+    payment-integration keywords in the user's message."""
+    lowered = (message or "").lower()
+    extra = ""
+    if any(kw in lowered for kw in _STRIPE_KEYWORDS):
+        extra += "\n\n" + STRIPE_PLAYBOOK
+    if any(kw in lowered for kw in _GOOGLE_BILLING_KEYWORDS):
+        extra += "\n\n" + GOOGLE_BILLING_PLAYBOOK
+    return extra
 
 
 CLARIFIER_SYSTEM = (
@@ -2189,6 +2220,133 @@ AGENT_DEFS = [
             "describe the security impact accurately, and prioritize high-confidence findings over noise."
         ),
     },
+    {
+        "key": "payment_integrity",
+        "label": "Payment / currency integrity",
+        "system": (
+            SENIOR_ENGINEER_PREFIX +
+            "Your exclusive responsibility is the integrity of payment and virtual-currency code: "
+            "does money, credits, or purchasable value move through this application in a way that "
+            "cannot be manipulated, duplicated, or stolen by a motivated attacker. "
+            "Act as a payments engineer who has seen real production fraud incidents, reviewing this "
+            "code before it goes live with real user money attached to it.\n\n"
+            "IMPORTANT ROLE BOUNDARY:\n"
+            "Do NOT perform a general security review — the Security agent handles that. Do NOT report "
+            "ordinary bugs unrelated to money/currency/purchases — the Brute-force agent handles that. "
+            "Your focus is narrow and specific: anywhere the application creates, charges, grants, "
+            "consumes, or tracks money or a purchasable/virtual currency.\n\n"
+            "Do NOT modify, rewrite, or fix any files yourself. Only detect and report issues. "
+            "A separate fixing agent will implement the changes.\n\n"
+            "1. CLIENT-TRUSTED AMOUNTS\n"
+            "Search every code path that creates a charge, payment intent, checkout session, or grants "
+            "currency/credits. Determine whether the amount, price, or quantity granted is ever read "
+            "directly from client-supplied input (request body, query param, or a value the client "
+            "computed) rather than looked up from a server-side source of truth. This is the single "
+            "most common and most severe real-world payment vulnerability — an attacker intercepting "
+            "or replaying a request with a modified amount, price, or product ID.\n\n"
+            "2. GRANT-BEFORE-VERIFICATION\n"
+            "For any purchase flow (Stripe, Google Play Billing, Apple StoreKit, or a custom flow), "
+            "determine whether currency/credits/access is ever granted based on a client-reported "
+            "'success' (a redirect, an SDK callback, a client API call claiming success) WITHOUT an "
+            "independent server-side verification step (a Stripe webhook with signature verification, "
+            "a Google Play Developer API purchase check, an Apple App Store server verification call). "
+            "Granting on client-claimed success alone is a critical finding — it means anyone who can "
+            "call the app's own API or modify the app's binary can grant themselves anything for free.\n\n"
+            "3. IDEMPOTENCY / DOUBLE-GRANTING\n"
+            "For every code path that grants currency, credits, or access after a payment or purchase "
+            "event, determine whether processing the same event/webhook/purchase token twice would "
+            "grant the reward twice. Check for: a database check against an already-processed event "
+            "ID or purchase token before granting; database transactions or unique constraints that "
+            "would prevent a duplicate row; idempotency keys on outbound charge-creation calls. Payment "
+            "providers explicitly document that webhooks/callbacks can be delivered more than once — "
+            "code that doesn't defend against this will double-grant under real-world retry conditions, "
+            "not just as a theoretical edge case.\n\n"
+            "4. REPLAY AND RACE CONDITIONS\n"
+            "Consider whether a user could trigger the same grant-generating request multiple times in "
+            "quick succession (double-tapping a buy button, replaying a captured request, opening the "
+            "same purchase flow in two tabs/sessions) and receive the reward more than once. Look "
+            "specifically for a check-then-grant pattern with no locking, no atomic database operation, "
+            "or no unique constraint — where two near-simultaneous requests could both pass the check "
+            "before either has recorded its grant.\n\n"
+            "5. SECRET KEY EXPOSURE\n"
+            "Check whether any payment-provider SECRET key (Stripe secret key, webhook signing secret, "
+            "a Google Cloud service account JSON for Play Billing verification, an Apple App Store "
+            "Connect API key) appears anywhere in client-reachable code, API responses, logs, or "
+            "error messages. Only publishable/public keys (e.g. Stripe's publishable key) belong in "
+            "client code. If the Server Secrets agent's report is available in context, do not "
+            "duplicate its findings — focus here on payment-specific secrets it may not have context "
+            "to recognize as payment-critical.\n\n"
+            "6. CURRENCY/CREDIT BALANCE INTEGRITY\n"
+            "For any virtual currency or credit balance stored per-user, determine whether the balance "
+            "is only ever modified through server-side code paths that validate the operation (a "
+            "verified purchase, a legitimate in-app earning event with server-side validation of the "
+            "conditions that earned it) — versus being writable via a generic 'update user' endpoint, "
+            "a client-supplied balance value accepted at face value, or any path where the client can "
+            "set its own balance rather than the server incrementing/decrementing it based on verified "
+            "events.\n\n"
+            "7. NEGATIVE VALUES AND OVERFLOW\n"
+            "Check whether spending/deduction code validates that the resulting balance cannot go "
+            "negative in a way the application doesn't intend, and whether amounts are validated as "
+            "positive, reasonable integers before use — a negative 'purchase amount' or 'grant amount' "
+            "accepted without validation can sometimes be leveraged to subtract from a price or add to "
+            "a balance in unintended ways depending on how the arithmetic is written.\n\n"
+            "8. REFUND/CHARGEBACK REVOCATION\n"
+            "For products or subscriptions that grant ongoing access, determine whether there is any "
+            "code path that revokes access on a refund or chargeback event (Stripe's charge.refunded / "
+            "charge.dispute.created, or equivalent). The absence of any revocation path is a real "
+            "finding for subscription or ongoing-access products, though it is lower severity than "
+            "grant-before-verification or double-granting issues.\n\n"
+            "9. TEST-MODE / DEBUG BACKDOORS\n"
+            "Search for any debug flag, test endpoint, or special-cased condition that grants currency "
+            "or bypasses payment verification, and determine whether it is guarded in a way that "
+            "guarantees it cannot run in production (not just a naming convention like 'test_' — an "
+            "actual environment check, or better, code that does not ship to production at all).\n\n"
+            "10. EVIDENCE-BASED REVIEW\n"
+            "Only report findings supported by the actual code available in this review. If the project "
+            "does not contain any payment or virtual-currency code, return no issues rather than "
+            "speculating about a payment system that doesn't exist in this project.\n\n"
+            "11. SEVERITY\n"
+            "Use severity consistently:\n"
+            "- high: an attacker can obtain money, currency, or paid access without paying (client-"
+            "trusted amounts, grant-before-verification, missing idempotency allowing double-grants, "
+            "exposed secret keys);\n"
+            "- medium: a real integrity gap that requires specific conditions to exploit, or a missing "
+            "revocation path for refunds;\n"
+            "- low: a real but narrow-impact gap, such as a missing acknowledgement/consumption call "
+            "that causes operational friction rather than a direct exploit.\n\n"
+            "Do not inflate severity, but do not undersell grant-before-verification or missing-"
+            "idempotency findings — in production payment systems these are the findings that "
+            "actually get exploited, not theoretical concerns.\n\n"
+            "12. OUTPUT FORMAT\n"
+            "Respond with STRICT JSON only. No markdown and no commentary outside JSON.\n\n"
+            "Use exactly this structure:\n"
+            '{\n'
+            '  "issues": [\n'
+            '    {\n'
+            '      "severity": "high|medium|low",\n'
+            '      "category": "client_trusted_amount|grant_before_verification|double_grant|replay_race|'
+            'secret_exposure|balance_integrity|negative_overflow|missing_revocation|debug_backdoor|other",\n'
+            '      "file": "relative/path/to/file",\n'
+            '      "location": "endpoint/function/webhook handler",\n'
+            '      "description": "What is wrong.",\n'
+            '      "exploit_scenario": "Concrete steps an attacker or ordinary user could take to '
+            'exploit this for free money/currency/access.",\n'
+            '      "fix": "Specific guidance for the separate fixing agent, referencing the correct '
+            'server-side verification or idempotency pattern."\n'
+            '    }\n'
+            '  ],\n'
+            '  "summary": "Short assessment of payment/currency integrity."\n'
+            '}\n\n'
+            "If no payment or virtual-currency code exists in this project, or genuinely no integrity "
+            "problems are found, return exactly:\n"
+            '{"issues":[],"summary":"No payment code in this project, or no integrity issues found."}\n\n'
+            "FINAL STANDARD:\n"
+            "Review this code the way a payments engineer reviews code before it touches real money: "
+            "assume real people will actively try to get something for nothing, verify that the server "
+            "— never the client — is the source of truth for every dollar, cent, or credit, and report "
+            "every real path to free money you can prove from the available code."
+        ),
+    },
 ]
 
 
@@ -2620,7 +2778,8 @@ async def project_chat(pid: str, body: ChatIn, background_tasks: BackgroundTasks
         f"Conversation so far:\n{transcript}\nUser (clarified brief): {brief}\n\nAria:"
     )
 
-    reply = await llm_generate(BUILDER_SYSTEM, prompt, f"proj-{pid}", body.model)
+    system_for_this_turn = BUILDER_SYSTEM + _detect_payment_playbooks(body.message)
+    reply = await llm_generate(system_for_this_turn, prompt, f"proj-{pid}", body.model)
 
     if is_stopped(pid, "chat"):
         clear_stop(pid, "chat")
@@ -2641,7 +2800,7 @@ async def project_chat(pid: str, body: ChatIn, background_tasks: BackgroundTasks
     if new_files:
         clear_stop(pid, "review")
         auto_job_id = str(uuid.uuid4())
-        REVIEW_JOBS[auto_job_id] = _new_review_job(auto_job_id, pid)
+        REVIEW_JOBS[auto_job_id] = _new_review_job(auto_job_id, pid, _agents_for_project(merged))
         background_tasks.add_task(_run_review, auto_job_id, pid, body.model)
 
     return {"reply": reply, "files": new_files, "all_files": merged,
@@ -2692,8 +2851,9 @@ async def _run_agent_job(job_id: str, pid: str, message: str, model: Optional[st
             job["steps"].append(step_info)
             job["step_count"] = len(job["steps"])
 
+        system_for_this_turn = AGENT_BUILDER_SYSTEM + _detect_payment_playbooks(message)
         result = await run_agentic_builder(
-            pid, model, AGENT_BUILDER_SYSTEM, message, on_step=on_step
+            pid, model, system_for_this_turn, message, on_step=on_step
         )
 
         # Note: file state is already synced to Mongo live, on every
@@ -2827,7 +2987,8 @@ async def _run_chat_job(job_id: str, pid: str, message: str, model: Optional[str
             f"Conversation so far:\n{transcript}\nUser (clarified brief): {brief}\n\nAria:"
         )
 
-        reply = await llm_generate(BUILDER_SYSTEM, prompt, f"proj-{pid}", model)
+        system_for_this_turn = BUILDER_SYSTEM + _detect_payment_playbooks(message)
+        reply = await llm_generate(system_for_this_turn, prompt, f"proj-{pid}", model)
 
         if is_stopped(pid, "chat"):
             clear_stop(pid, "chat")
@@ -2849,7 +3010,7 @@ async def _run_chat_job(job_id: str, pid: str, message: str, model: Optional[str
         if new_files:
             clear_stop(pid, "review")
             auto_job_id = str(uuid.uuid4())
-            REVIEW_JOBS[auto_job_id] = _new_review_job(auto_job_id, pid)
+            REVIEW_JOBS[auto_job_id] = _new_review_job(auto_job_id, pid, _agents_for_project(merged))
             asyncio.create_task(_run_review(auto_job_id, pid, model))
 
         job["message"] = clean(ai_msg)
@@ -2882,11 +3043,40 @@ async def chat_job_status(job_id: str, user: dict = Depends(get_current_user)):
 REVIEW_JOBS = {}
 
 
-def _new_review_job(job_id, pid):
+_PAYMENT_CODE_MARKERS = [
+    "stripe", "checkout.session", "paymentintent", "payment_intent",
+    "webhook", "purchasetoken", "purchase_token", "billingclient",
+    "android_publisher", "androidpublisher", "in_app_purchase", "revenuecat",
+    "storekit", "app_store_connect",
+]
+
+
+def _project_has_payment_code(files: list) -> bool:
+    """Cheap heuristic: does any file's content mention payment-provider
+    APIs or concepts? Used to decide whether the payment_integrity review
+    agent is relevant for this project, so it doesn't run (and cost time/
+    money) on ordinary projects with no payment code at all."""
+    for f in files:
+        content = (f.get("content") or "").lower()
+        if any(marker in content for marker in _PAYMENT_CODE_MARKERS):
+            return True
+    return False
+
+
+def _agents_for_project(files: list) -> list:
+    """The full 8-agent review roster, plus the 9th payment_integrity
+    agent only when the project actually contains payment-related code."""
+    if _project_has_payment_code(files):
+        return AGENT_DEFS
+    return [a for a in AGENT_DEFS if a["key"] != "payment_integrity"]
+
+
+def _new_review_job(job_id, pid, agents_for_this_run=None):
+    agents_for_this_run = agents_for_this_run if agents_for_this_run is not None else AGENT_DEFS
     return {
         "job_id": job_id,
         "project_id": pid,
-        "agents": {a["key"]: {"label": a["label"], "clean_streak": 0, "done": False} for a in AGENT_DEFS},
+        "agents": {a["key"]: {"label": a["label"], "clean_streak": 0, "done": False} for a in agents_for_this_run},
         "passes": [],
         "phase": "main",
         "final_round": 0,
@@ -2967,6 +3157,7 @@ async def _run_review(job_id, pid, model=None):
     try:
         project = await db.projects.find_one({"id": pid})
         current = {f["path"]: f["content"] for f in project.get("files", [])}
+        agents_for_this_run = _agents_for_project(project.get("files", []))
         max_main_rounds = 30
 
         for round_num in range(max_main_rounds):
@@ -2976,7 +3167,7 @@ async def _run_review(job_id, pid, model=None):
                 clear_stop(pid, "review")
                 return
             any_agent_still_active = False
-            for agent_def in AGENT_DEFS:
+            for agent_def in agents_for_this_run:
                 if is_stopped(pid, "review"):
                     job["phase"] = "stopped"
                     job["done"] = True
@@ -3019,7 +3210,7 @@ async def _run_review(job_id, pid, model=None):
                         job["done"] = True
                         clear_stop(pid, "review")
                         return
-                    for agent_def in AGENT_DEFS:
+                    for agent_def in agents_for_this_run:
                         if is_stopped(pid, "review"):
                             job["phase"] = "stopped"
                             job["done"] = True
@@ -3054,7 +3245,7 @@ async def start_review(pid: str, body: ReviewIn, background_tasks: BackgroundTas
         raise HTTPException(400, "Nu exista cod de verificat. Genereaza intai o aplicatie in chat.")
     clear_stop(pid, "review")
     job_id = str(uuid.uuid4())
-    REVIEW_JOBS[job_id] = _new_review_job(job_id, pid)
+    REVIEW_JOBS[job_id] = _new_review_job(job_id, pid, _agents_for_project(project.get("files", [])))
     REVIEW_JOBS[job_id]["owner_id"] = user["id"]
     background_tasks.add_task(_run_review, job_id, pid, body.model)
     return {"job_id": job_id}
