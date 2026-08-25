@@ -1,5 +1,3 @@
-import "react-native-get-random-values";
-import { v4 as uuidv4 } from "uuid";
 import { storage } from "@/src/utils/storage";
 
 const BASE = process.env.EXPO_PUBLIC_BACKEND_URL;
@@ -38,11 +36,20 @@ async function setToken(token: string | null) {
 
 /** A stable per-install identifier, persisted so the backend's per-device
  * login rate limit (5 attempts / 24h) applies consistently across app
- * restarts rather than resetting every launch. */
+ * restarts rather than resetting every launch. Generated without any
+ * external crypto/uuid dependency (Math.random() + timestamp is more than
+ * sufficient here — this is a rate-limit bucket key, not a security
+ * credential, so RFC-4122 compliance or cryptographic randomness isn't
+ * required). */
+function generateDeviceId(): string {
+  const rand = () => Math.floor(Math.random() * 1e9).toString(36);
+  return `dev-${Date.now().toString(36)}-${rand()}-${rand()}`;
+}
+
 export async function getDeviceId(): Promise<string> {
   const existing = await storage.getItem(DEVICE_ID_KEY, "");
   if (existing) return existing as string;
-  const fresh = uuidv4();
+  const fresh = generateDeviceId();
   await storage.setItem(DEVICE_ID_KEY, fresh);
   return fresh;
 }
