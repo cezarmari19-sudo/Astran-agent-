@@ -121,6 +121,8 @@ export default function ProjectScreen() {
     await storage.removeItem(agentJobKey);
     if (job.error) {
       show(job.error, "err");
+    } else if (job.sandbox_unavailable) {
+      show("Agent mode indisponibil: sandbox-ul de execuție nu răspunde pe acest server.", "err");
     }
     // job.message (the final assistant reply) and any files the agent wrote
     // were already persisted by the backend as the tool calls ran — just
