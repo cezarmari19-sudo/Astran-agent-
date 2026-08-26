@@ -2987,6 +2987,7 @@ async def project_chat(pid: str, body: ChatIn, background_tasks: BackgroundTasks
         clear_stop(pid, "review")
         auto_job_id = str(uuid.uuid4())
         REVIEW_JOBS[auto_job_id] = _new_review_job(auto_job_id, pid, _agents_for_project(merged))
+        REVIEW_JOBS[auto_job_id]["owner_id"] = user["id"]
         background_tasks.add_task(_run_review, auto_job_id, pid, body.model)
 
     return {"reply": reply, "files": new_files, "all_files": merged,
@@ -3212,6 +3213,7 @@ async def _run_chat_job(job_id: str, pid: str, message: str, model: Optional[str
             clear_stop(pid, "review")
             auto_job_id = str(uuid.uuid4())
             REVIEW_JOBS[auto_job_id] = _new_review_job(auto_job_id, pid, _agents_for_project(merged))
+            REVIEW_JOBS[auto_job_id]["owner_id"] = job.get("owner_id")
             asyncio.create_task(_run_review(auto_job_id, pid, model))
 
         job["message"] = clean(ai_msg)
@@ -3519,9 +3521,14 @@ async def websearch(body: SearchIn, current_user: dict = Depends(get_current_use
     headers = {"User-Agent": "Mozilla/5.0 (AI-Builder)"}
     for base in SEARX_INSTANCES:
         try:
-            r = requests.get(f"{base}/search",
-                             params={"q": body.query, "format": "json"},
-                             headers=headers, timeout=10)
+            # requests is blocking; run it off the event loop so one slow/
+            # hanging SearXNG instance can't stall every other request the
+            # server is handling concurrently.
+            r = await asyncio.to_thread(
+                requests.get, f"{base}/search",
+                params={"q": body.query, "format": "json"},
+                headers=headers, timeout=10,
+            )
             if r.status_code == 200 and r.headers.get("content-type", "").startswith("application/json"):
                 data = r.json()
                 results = []
@@ -3543,14 +3550,18 @@ async def websearch(body: SearchIn, current_user: dict = Depends(get_current_use
 async def github_repos(body: GithubReposIn, current_user: dict = Depends(get_current_user)):
     headers = {"Authorization": f"Bearer {body.token}",
                "Accept": "application/vnd.github+json"}
-    r = requests.get("https://api.github.com/user/repos",
-                     params={"per_page": 100, "sort": "updated"},
-                     headers=headers, timeout=15)
+    r = await asyncio.to_thread(
+        requests.get, "https://api.github.com/user/repos",
+        params={"per_page": 100, "sort": "updated"},
+        headers=headers, timeout=15,
+    )
     if r.status_code != 200:
         raise HTTPException(400, f"Token GitHub invalid ({r.status_code})")
     repos = [{"full_name": x["full_name"], "private": x["private"],
               "default_branch": x.get("default_branch", "main")} for x in r.json()]
-    gh_user_resp = requests.get("https://api.github.com/user", headers=headers, timeout=15)
+    gh_user_resp = await asyncio.to_thread(
+        requests.get, "https://api.github.com/user", headers=headers, timeout=15
+    )
     login = gh_user_resp.json().get("login") if gh_user_resp.status_code == 200 else None
     return {"login": login, "repos": repos}
 
@@ -3572,7 +3583,9 @@ async def github_commit(body: GithubCommitIn, current_user: dict = Depends(get_c
         url = f"https://api.github.com/repos/{body.repo}/contents/{path}"
         sha = None
         try:
-            g = requests.get(url, params={"ref": body.branch}, headers=headers, timeout=15)
+            g = await asyncio.to_thread(
+                requests.get, url, params={"ref": body.branch}, headers=headers, timeout=15
+            )
             logger.info(f"github commit: GET {path} -> {g.status_code}")
             if g.status_code == 200:
                 sha = g.json().get("sha")
@@ -3583,7 +3596,9 @@ async def github_commit(body: GithubCommitIn, current_user: dict = Depends(get_c
         if sha:
             payload["sha"] = sha
         try:
-            p = requests.put(url, headers=headers, json=payload, timeout=20)
+            p = await asyncio.to_thread(
+                requests.put, url, headers=headers, json=payload, timeout=20
+            )
             ok = p.status_code in (200, 201)
             err_detail = None
             if not ok:
