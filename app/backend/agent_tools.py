@@ -218,10 +218,27 @@ async def _openai_turn(api_key, model, system_message, messages):
                 args = {}
             tool_calls.append(ToolCall(call_id=tc.id, name=tc.function.name, arguments=args))
 
+    # IMPORTANT: raw_assistant_message must be a plain dict, not the SDK's
+    # ChatCompletionMessage object — append_assistant_turn puts this
+    # straight back into `messages` for the NEXT chat.completions.create
+    # call, and the OpenAI client only accepts plain dicts there. Passing
+    # the object through unconverted works for a single turn but raises
+    # on the second agentic step once tool calls are involved.
+    assistant_message: dict = {"role": "assistant", "content": msg.content}
+    if msg.tool_calls:
+        assistant_message["tool_calls"] = [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+            }
+            for tc in msg.tool_calls
+        ]
+
     return AgentTurnResult(
         text=msg.content,
         tool_calls=tool_calls,
-        raw_assistant_message=msg,
+        raw_assistant_message=assistant_message,
     )
 
 
